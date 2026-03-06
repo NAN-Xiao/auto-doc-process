@@ -30,6 +30,9 @@ pandas>=2.0.0
 openpyxl>=3.1.0           # pandas 读 Excel
 tiktoken>=0.7.0           # token 计数
 
+# --- LightRAG 知识图谱 ---
+lightrag-hku>=1.4.0          # LightRAG 图谱构建框架
+
 # --- 配置 ---
 PyYAML>=6.0
 

@@ -1,0 +1,85 @@
+# ===========================================
+# LightRAG 知识图谱配置 - lightrag.yaml
+# ===========================================
+#
+# 作用：配置 LightRAG 知识图谱构建参数
+#
+# 主要内容：
+#   - LLM 配置（用于实体/关系抽取）
+#   - Embedding 配置（复用现有 BGE 模型）
+#   - 图谱构建参数（分块大小、抽取轮数等）
+#   - 存储后端配置
+#   - PostgreSQL 图谱导出配置
+#
+# 使用场景：
+#   - 运行 run_lightrag.py 构建知识图谱
+#   - 从预处理文档中抽取实体和关系
+#   - 将图谱数据导出到 PostgreSQL
+#
+# ===========================================
+
+lightrag:
+  # 工作目录（LightRAG 的缓存和中间数据）
+  working_dir: "./lightrag_workspace"
+
+  # -----------------------------------------
+  # LLM 配置（用于实体关系抽取）
+  # 复用 doc_splitter.yaml 中的 DeepSeek 配置
+  # -----------------------------------------
+  llm:
+    provider: "deepseek"
+    api_base: "https://api.deepseek.com"
+    # api_key 从 doc_splitter.yaml 的 deepseek.api_key 读取
+    model: "deepseek-chat"
+    max_async: 4              # 最大并发 LLM 请求数
+    max_token_size: 32768     # 模型最大 token 窗口
+    timeout: 180              # 单次请求超时（秒）
+
+  # -----------------------------------------
+  # Embedding 配置
+  # 复用现有的 BAAI/bge-small-zh-v1.5 模型
+  # -----------------------------------------
+  embedding:
+    provider: "local"                    # local = HuggingFace 本地模型
+    model: "BAAI/bge-small-zh-v1.5"
+    dim: 512                             # 向量维度
+    max_token_size: 512                  # 最大 token
+    batch_num: 10                        # 批量 embedding 数
+    # cache_folder / device 从 doc_splitter.yaml 读取
+
+  # -----------------------------------------
+  # 图谱构建参数
+  # -----------------------------------------
+  graph:
+    chunk_token_size: 1200               # LightRAG 内部分块大小（token）
+    chunk_overlap_token_size: 100        # 分块重叠
+    entity_extract_max_gleaning: 1       # 实体抽取最大轮数（越多越全但越慢）
+    max_graph_nodes: 1000                # 最大图节点数
+    max_parallel_insert: 2               # 并行插入任务数
+    enable_llm_cache: true               # 启用 LLM 结果缓存
+
+  # -----------------------------------------
+  # 存储后端（LightRAG 内部存储）
+  # 使用本地存储，构建完成后导出到 PostgreSQL
+  # -----------------------------------------
+  storage:
+    kv: "JsonKVStorage"                  # KV 存储（JSON 文件）
+    vector: "NanoVectorDBStorage"        # 向量存储（本地 NanoVectorDB）
+    graph: "NetworkXStorage"             # 图存储（本地 NetworkX）
+    doc_status: "JsonDocStatusStorage"   # 文档状态（JSON 文件）
+
+  # -----------------------------------------
+  # PostgreSQL 图谱导出配置
+  # 构建完成后将实体和关系导出到 PG 表
+  # 数据库连接复用 db_info.yml
+  # -----------------------------------------
+  pg_export:
+    enabled: true                        # 是否启用导出到 PostgreSQL
+    entity_table: "lightrag_entities"    # 实体表名
+    relation_table: "lightrag_relations" # 关系表名
+    chunk_table: "lightrag_chunks"       # 文本块表名
+    # 是否导出实体的 embedding 向量
+    export_entity_embeddings: true
+    # 向量维度（与 embedding.dim 一致）
+    vector_dim: 512
+
