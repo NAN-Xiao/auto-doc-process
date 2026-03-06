@@ -1,0 +1,135 @@
+# ===========================================
+# 文档拆分配置 - doc_splitter.yaml
+# ===========================================
+# 
+# 作用：文档处理工具配置，控制如何将文档拆分为适合RAG的文本块
+# 
+# 主要内容：
+#   - 文本分割配置（chunk大小、重叠、分隔符）
+#   - 图片命名配置（LLM智能命名 vs 简单模式）
+#   - 上下文提取配置（图片命名时的上下文范围）
+#   - 文本去重配置（删除重复内容）
+#   - 输出配置（目录结构、时间戳）
+#   - 支持的文档格式（PDF、DOCX）
+#   - 处理选项（跳过已存在、错误处理）
+# 
+# 使用场景：
+#   - 执行 文档处理器.exe 时自动读取
+#   - 批量处理Word/PDF文档
+#   - 生成向量数据库所需的JSON文件
+# 
+# 处理流程：
+#   1. 读取文档内容（Word/PDF）
+#   2. 按配置的规则拆分文本块
+#   3. 提取图片并智能命名
+#   4. 去除重复内容
+#   5. 输出JSON文件（文本块+图片元数据）
+# 
+# 重要参数：
+#   - chunk_size: 文本块大小（影响检索粒度和精度）
+#   - chunk_overlap: 重叠大小（保证上下文连贯性）
+#   - use_llm: 是否使用LLM智能命名图片（更准确但更慢）
+# 
+# 注意事项：
+#   - chunk_size过小导致上下文不足
+#   - chunk_size过大导致检索不精确
+#   - 使用LLM命名需要API密钥和额外时间
+#   - 修改配置后需要重新处理所有文档
+# ===========================================
+
+# ===========================================
+# DeepSeek LLM 配置（图片智能命名等功能使用）
+# ===========================================
+deepseek:
+  api_key: "sk-6bcfa69eced746968f1f2e7766ee7fcb"   # DeepSeek API Key（请替换为你的真实 Key）
+  default_model: "deepseek-chat"                    # 默认模型
+
+doc_splitter:
+  # 文本分割配置
+  text_splitter:
+    chunk_size: 1000      # 每个文本块的最大字符数，影响RAG检索粒度
+    chunk_overlap: 200    # 相邻块之间的重叠字符数，保证上下文连贯性
+    separators:
+      - "\n\n"
+      - "\n"
+      - "。"
+      - "！"
+      - "？"
+      - "；"
+      - "，"
+      - " "
+      - ""
+
+  # 图片命名配置
+  image_naming:
+    use_llm: true         # 是否使用LLM智能命名（false=简单模式，true=AI模式）
+    max_length: 18        # 图片名称最大长度（中文字符数，建议15-20，过长影响显示）
+    
+    llm:                  # LLM模式配置（仅use_llm=true时生效）
+      api_base: "https://api.deepseek.com"  # DeepSeek API地址
+      temperature: 0.7    # 生成创造性（0-1，越高越随机）
+      max_tokens: 100     # 最大token数（控制响应长度）
+      frequency_penalty: 0.3  # 频率惩罚（减少重复用词）
+      presence_penalty: 0.2   # 存在惩罚（鼓励话题多样性）
+    
+    keywords:             # 简单模式关键词（从周围文本中提取）
+      - "图"
+      - "表"
+      - "示意"
+      - "流程"
+      - "结构"
+      - "架构"
+      - "模型"
+      - "界面"
+      - "截图"
+
+  # 上下文提取配置（图片命名时使用）
+  context_extraction:
+    max_length: 600               # 单段上下文最大字符数
+    word_lookback_paragraphs: 8   # Word文档向前查找段落数
+    word_lookahead_paragraphs: 5  # Word文档向后查找段落数
+    pdf_prev_page_length: 400     # PDF前一页提取字符数
+    pdf_next_page_length: 400     # PDF后一页提取字符数
+  
+  # 文本去重配置（删除重复内容）
+  text_deduplication:
+    enabled: true                 # 是否启用去重功能
+    min_text_length: 10           # 最小文本长度（低于此值不处理）
+    min_pattern_length: 3         # 最小重复模式长度（检测重复的最小单元）
+    repeat_ratio_threshold: 0.6   # 重复比例阈值（0-1，超过此值视为重复文本）
+
+  # 输出配置
+  output:
+    root_dir: "processed"         # 输出根目录名称（相对于documents_dir）
+    structure: "nested"           # 目录结构：nested=时间戳/文档名，flat=扁平，same=同目录
+    add_timestamp: true           # 是否在输出目录添加时间戳（避免覆盖）
+    verbose: true                 # 是否显示详细日志
+
+  # 支持的文档格式
+  supported_formats:
+    - ".pdf"                      # PDF文档
+    - ".docx"                     # Word文档（.doc不支持）
+
+  # 处理选项
+  processing:
+    skip_existing: false          # 是否跳过已存在的输出（false=总是重新处理）
+    continue_on_error: true       # 遇到错误是否继续处理下一个文档
+
+# ===========================================
+# 路径配置
+# 相对路径基于 auto-doc/ 目录
+# ===========================================
+paths:
+  documents_dir: "../"            # 文档目录（飞书下载目录，与 feishu.yaml 中 output_dir 一致）
+  processed_subdir: "processed"   # 处理结果子目录名
+  excel_dir: "../excel"           # Excel 策划表源目录
+
+# ===========================================
+# 向量模型配置
+# ===========================================
+embedding:
+  model: "BAAI/bge-small-zh-v1.5"   # 模型名称
+  huggingface:
+    cache_folder: "./models"         # 模型缓存目录（相对于 auto-doc/）
+    device: "cpu"                    # 推理设备: cpu / cuda
+    normalize_embeddings: true       # 是否对向量做 L2 归一化

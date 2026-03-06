@@ -1,0 +1,35 @@
+# =============================================
+# auto-doc 项目依赖（仅直接使用的包）
+# =============================================
+
+# --- 飞书 API ---
+requests>=2.31.0
+lark-oapi>=1.5.0
+
+# --- 文档处理 ---
+PyMuPDF>=1.24.0          # PDF 拆分（import fitz）
+python-docx>=1.0.0       # Word 拆分（import docx）
+lxml>=5.0.0              # python-docx 依赖
+
+# --- LangChain 文本拆分 & LLM ---
+langchain-text-splitters>=1.0.0
+langchain-core>=1.0.0
+langchain-openai>=1.0.0  # ChatOpenAI（DeepSeek LLM 图片命名）
+langchain-community>=0.4.0  # HuggingFaceEmbeddings
+
+# --- Embedding 模型 ---
+sentence-transformers>=3.0.0   # BAAI/bge-small-zh-v1.5
+torch>=2.0.0
+
+# --- 向量数据库 ---
+psycopg[binary]>=3.1.0   # PostgreSQL 驱动
+pgvector>=0.3.0           # pgvector 扩展
+
+# --- Excel 元数据 ---
+pandas>=2.0.0
+openpyxl>=3.1.0           # pandas 读 Excel
+tiktoken>=0.7.0           # token 计数
+
+# --- 配置 ---
+PyYAML>=6.0
+

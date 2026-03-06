@@ -1,0 +1,55 @@
+# ============================================================
+# 飞书文档自动同步 - 配置文件（模板）
+# 复制为 feishu.yaml 并填入实际值
+# 由系统定时任务（Windows 任务计划程序）调度执行
+# ============================================================
+
+feishu:
+  # -------------------- 飞书应用凭证 --------------------
+  app_id: "<YOUR_APP_ID>"                  # 飞书应用 App ID
+  app_secret: "<YOUR_APP_SECRET>"          # 飞书应用 App Secret
+  base_url: "https://open.feishu.cn"       # 飞书 API 地址（私有化部署可改）
+
+  # -------------------- 输出目录 --------------------
+  output_dir: "../"
+
+  # -------------------- 同步范围 --------------------
+  space_ids: []
+
+  # -------------------- 日志配置 --------------------
+  log:
+    level: "INFO"
+    dir: ""
+
+  # -------------------- 导出参数 --------------------
+  export:
+    poll_max_wait: 60
+    poll_interval: 2
+    poll_initial_delay: 3
+    rate_limit_delay: 1
+    type_format_map:
+      doc: "docx"
+      docx: "docx"
+      sheet: "xlsx"
+      bitable: "xlsx"
+    skip_types:
+      - "mindnote"
+      - "file"
+      - "slides"
+      - "catalog"
+
+  # -------------------- 向量化入库 --------------------
+  vectorize:
+    enabled: true
+    model_path: "models/models--BAAI--bge-small-zh-v1.5/snapshots/7999e1d3359715c523056ef9478215996d62a620"
+    chunk_size: 500
+    chunk_overlap: 50
+
+  # -------------------- 增量清单 --------------------
+  manifest:
+    path: ""
+
+  # -------------------- 进程锁 --------------------
+  lock:
+    path: ""
+

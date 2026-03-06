@@ -1,0 +1,9 @@
+# 数据库配置模板 - 复制为 db_info.yml 并填入实际值
+database:
+  enabled: true
+  host: localhost
+  port: 5432
+  database: slg_config
+  user: postgres
+  password: "<YOUR_PASSWORD>"
+
