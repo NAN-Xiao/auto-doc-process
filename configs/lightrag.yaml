@@ -12,15 +12,16 @@
 #   - PostgreSQL 图谱导出配置
 #
 # 使用场景：
-#   - 运行 run_lightrag.py 构建知识图谱
-#   - 从预处理文档中抽取实体和关系
-#   - 将图谱数据导出到 PostgreSQL
+#   - python -m auto-doc-process graph        → 构建最新批次图谱
+#   - python -m auto-doc-process query "问题"  → 查询图谱
+#   - python -m auto-doc-process export x.csv → 导出图谱
+#   - 完整流程中自动串联（sync → 预处理 → 图谱构建）
 #
 # ===========================================
 
 lightrag:
-  # 工作目录（LightRAG 的缓存和中间数据）
-  working_dir: "./lightrag_workspace"
+  # 工作目录（LightRAG 的缓存和中间数据，相对于 auto-doc-process/，与 processed 同级）
+  working_dir: "../lightrag_workspace"
 
   # -----------------------------------------
   # LLM 配置（用于实体关系抽取）

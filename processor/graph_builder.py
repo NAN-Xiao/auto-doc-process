@@ -452,9 +452,9 @@ class LightRAGGraphBuilder:
         self._embedding_func = None
 
     def _resolve_working_dir(self) -> str:
-        """解析工作目录（确保绝对路径）"""
+        """解析工作目录（相对路径基于 auto-doc-process/，与其他配置一致）"""
         from ..core.config import MODULE_DIR
-        raw = self.config.get("working_dir", "./lightrag_workspace")
+        raw = self.config.get("working_dir", "../lightrag_workspace")
         p = Path(raw)
         if not p.is_absolute():
             p = (MODULE_DIR / p).resolve()
