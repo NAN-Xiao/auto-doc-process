@@ -21,6 +21,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from langchain_openai import ChatOpenAI
 from ..core.config import load_processor_config as load_config
+from ..core.logger import Logger
 
 
 @dataclass
@@ -201,15 +202,16 @@ def generate_smart_image_name_with_llm(
         if not image_name or len(image_name) < 2:
             return generate_smart_image_name_simple(context_before, context_after, max_length)
         
-        print(f"    🤖 LLM生成: {image_name}")
+        Logger.info(f"LLM生成: {image_name}", indent=2)
         return image_name
         
     except Exception as e:
-        print(f"    ⚠️  LLM生成失败: {e}，使用简单算法")
+        Logger.warning(f"LLM生成失败: {e}，使用简单算法", indent=2)
         return generate_smart_image_name_simple(context_before, context_after, max_length)
 
 
-def generate_smart_image_name_simple(context_before: str, context_after: str, max_length: int = 10) -> str:
+def generate_smart_image_name_simple(context_before: str, context_after: str,
+                                     max_length: int = 10, config: dict = None) -> str:
     """
     使用简单算法根据图片周围的上下文生成智能图片名称（不使用 LLM）
     
@@ -217,6 +219,7 @@ def generate_smart_image_name_simple(context_before: str, context_after: str, ma
         context_before: 图片前的文字
         context_after: 图片后的文字
         max_length: 最大长度（中文字符数）
+        config: 处理器配置字典（None 则自动加载）
         
     Returns:
         智能图片名称（不超过max_length个中文字）
@@ -231,8 +234,9 @@ def generate_smart_image_name_simple(context_before: str, context_after: str, ma
     if not context:
         return "图片"
     
-    # 从配置文件读取关键词列表
-    config = load_config()
+    # 从配置读取关键词列表
+    if config is None:
+        config = load_config()
     image_naming_config = config.get('doc_splitter', {}).get('image_naming', {})
     keywords = image_naming_config.get('keywords', [
         '图', '表', '示意', '流程', '结构', '架构', '模型', '界面', '截图'
@@ -269,7 +273,8 @@ def generate_smart_image_name_simple(context_before: str, context_after: str, ma
 class DocumentSplitter:
     """文档拆分器基类 - 使用LangChain的语义分割"""
     
-    def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200, use_llm_naming: bool = False):
+    def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200,
+                 use_llm_naming: bool = False, config: dict = None):
         """
         初始化文档拆分器
         
@@ -277,27 +282,30 @@ class DocumentSplitter:
             chunk_size: 每个chunk的目标字符数（默认1000，推荐800-1500）
             chunk_overlap: chunk之间的重叠字符数（默认200，推荐15-20%）
             use_llm_naming: 是否使用 LLM 智能生成图片名称（默认False）
+            config: 处理器配置字典（None 则自动加载）
         """
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
         self.use_llm_naming = use_llm_naming
         self.llm = None
         
+        # 配置注入：优先使用传入的 config，否则从文件加载
+        self.config = config if config is not None else load_config()
+        
+        # chunk 参数优先从配置读取，构造函数参数作为 fallback
+        splitter_cfg = self.config.get('doc_splitter', {}).get('text_splitter', {})
+        self.chunk_size = splitter_cfg.get('chunk_size', chunk_size)
+        self.chunk_overlap = splitter_cfg.get('chunk_overlap', chunk_overlap)
+        
         # 从配置读取图片命名参数
-        config = load_config()
-        image_naming_config = config.get('doc_splitter', {}).get('image_naming', {})
+        image_naming_config = self.config.get('doc_splitter', {}).get('image_naming', {})
         self.image_max_length = image_naming_config.get('max_length', 18)
         
         # 如果启用 LLM 命名，初始化 LLM
         if use_llm_naming:
             try:
-                config = load_config()
-                deepseek_config = config.get('deepseek', {})
+                deepseek_config = self.config.get('deepseek', {})
                 api_key = deepseek_config.get('api_key', '')
                 model = deepseek_config.get('default_model', 'deepseek-chat')
                 
-                # 从配置文件读取 LLM 参数
-                image_naming_config = config.get('doc_splitter', {}).get('image_naming', {})
                 llm_config = image_naming_config.get('llm', {})
                 
                 if api_key:
@@ -312,30 +320,25 @@ class DocumentSplitter:
                             'presence_penalty': llm_config.get('presence_penalty', 0.0)
                         }
                     )
-                    print(f"🤖 LLM智能命名已启用: {model}")
+                    Logger.info(f"LLM智能命名已启用: {model}")
                 else:
-                    print(f"⚠️  未配置 DEEPSEEK_API_KEY，使用简单算法命名")
+                    Logger.warning("未配置 DEEPSEEK_API_KEY，使用简单算法命名")
                     self.use_llm_naming = False
             except Exception as e:
-                print(f"⚠️  LLM初始化失败: {e}，使用简单算法命名")
+                Logger.warning(f"LLM初始化失败: {e}，使用简单算法命名")
                 self.use_llm_naming = False
-        
-        # 使用项目的语义分割配置
-        # 从配置文件读取分隔符列表
-        full_config = load_config()
-        splitter_config = full_config.get('doc_splitter', {}).get('text_splitter', {})
         
         # 直接初始化 LangChain 的递归字符分割器
         self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            separators=splitter_config.get('separators', [
+            chunk_size=self.chunk_size,
+            chunk_overlap=self.chunk_overlap,
+            separators=splitter_cfg.get('separators', [
                 "\n\n", "\n", "。", "！", "？", "；", "，", " ", ""
             ]),
             length_function=len,
         )
         
-        print(f"📐 语义分割器已初始化: chunk_size={chunk_size}, overlap={chunk_overlap}")
+        Logger.info(f"语义分割器已初始化: chunk_size={self.chunk_size}, overlap={self.chunk_overlap}")
     
     def split_text(self, text: str, metadata: Optional[Dict] = None) -> List[str]:
         """
@@ -367,7 +370,7 @@ class DocumentSplitter:
         # 提取文本内容
         text_chunks = [chunk.page_content for chunk in doc_chunks]
         
-        print(f"  ✂️  语义拆分: {len(text)} 字符 -> {len(text_chunks)} 个chunks")
+        Logger.info(f"语义拆分: {len(text)} 字符 -> {len(text_chunks)} 个chunks", indent=1)
         
         return text_chunks
     
@@ -432,7 +435,8 @@ class DocumentSplitter:
 class PDFSplitter(DocumentSplitter):
     """PDF文档拆分器 - 使用语义分割"""
     
-    def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200, use_llm_naming: bool = False):
+    def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200,
+                 use_llm_naming: bool = False, config: dict = None):
         """
         初始化PDF拆分器
         
@@ -440,15 +444,14 @@ class PDFSplitter(DocumentSplitter):
             chunk_size: 每个chunk的字符数（默认1000，适合中文文档）
             chunk_overlap: chunk重叠字符数（默认200，保证上下文连贯）
             use_llm_naming: 是否使用 LLM 智能生成图片名称（默认False）
+            config: 处理器配置字典（None 则自动加载）
         """
-        super().__init__(chunk_size, chunk_overlap, use_llm_naming)
+        super().__init__(chunk_size, chunk_overlap, use_llm_naming, config=config)
         try:
             import fitz  # PyMuPDF
             self.fitz = fitz
         except ImportError as e:
-            print(f"❌ 缺少依赖: {e}")
-            print("请安装: pip install PyMuPDF")
-            sys.exit(1)
+            raise ImportError(f"缺少依赖 PyMuPDF: {e}。请安装: pip install PyMuPDF") from e
     
     def process(self, pdf_path: Path, output_dir: Path) -> DocumentInfo:
         """
@@ -461,7 +464,7 @@ class PDFSplitter(DocumentSplitter):
         Returns:
             文档信息
         """
-        print(f"📄 处理PDF文档: {pdf_path.name}")
+        Logger.info(f"处理PDF文档: {pdf_path.name}")
         
         # 创建输出目录结构
         doc_dir = output_dir
@@ -516,7 +519,7 @@ class PDFSplitter(DocumentSplitter):
         
         self._save_doc_info(doc_info, doc_dir)
         
-        print(f"✅ 完成: {len(chunks)} 个chunks, {images_count} 张图片")
+        Logger.success(f"完成: {len(chunks)} 个chunks, {images_count} 张图片")
         return doc_info
     
     def _extract_text_and_images(self, pdf_path: Path) -> Tuple[str, List[ImageInfo], int]:
@@ -530,9 +533,9 @@ class PDFSplitter(DocumentSplitter):
         try:
             doc = self.fitz.open(pdf_path)
         except Exception as e:
-            error_msg = f"⚠️  无法打开PDF文档（可能已损坏或不是有效的 PDF 文件）: {pdf_path.name}"
-            print(error_msg)
-            print(f"   错误详情: {e}")
+            error_msg = f"无法打开PDF文档（可能已损坏或不是有效的 PDF 文件）: {pdf_path.name}"
+            Logger.error(error_msg)
+            Logger.error(f"错误详情: {e}", indent=1)
             raise ValueError(error_msg) from e
         
         # 第一步：收集所有页面的文本、图片信息和文本块（带字体信息）
@@ -570,9 +573,8 @@ class PDFSplitter(DocumentSplitter):
                 'text_blocks': text_blocks
             })
         
-        # 从配置文件读取上下文提取参数
-        config = load_config()
-        context_config = config.get('doc_splitter', {}).get('context_extraction', {})
+        # 从配置读取上下文提取参数
+        context_config = self.config.get('doc_splitter', {}).get('context_extraction', {})
         
         prev_page_len = context_config.get('pdf_prev_page_length', 400)
         next_page_len = context_config.get('pdf_next_page_length', 400)
@@ -794,7 +796,7 @@ class PDFSplitter(DocumentSplitter):
                 with open(image_path, 'wb') as f:
                     f.write(image_bytes)
                 
-                print(f"  🖼️  保存图片: {image_info.smart_filename}")
+                Logger.info(f"保存图片: {image_info.smart_filename}", indent=1)
                 image_count += 1
         
         # 保存图片信息索引
@@ -831,7 +833,8 @@ class PDFSplitter(DocumentSplitter):
 class WordSplitter(DocumentSplitter):
     """Word文档拆分器 - 使用语义分割"""
     
-    def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200, use_llm_naming: bool = False):
+    def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200,
+                 use_llm_naming: bool = False, config: dict = None):
         """
         初始化Word拆分器
         
@@ -839,8 +842,9 @@ class WordSplitter(DocumentSplitter):
             chunk_size: 每个chunk的字符数（默认1000，适合中文文档）
             chunk_overlap: chunk重叠字符数（默认200，保证上下文连贯）
             use_llm_naming: 是否使用 LLM 智能生成图片名称（默认False）
+            config: 处理器配置字典（None 则自动加载）
         """
-        super().__init__(chunk_size, chunk_overlap, use_llm_naming)
+        super().__init__(chunk_size, chunk_overlap, use_llm_naming, config=config)
         try:
             from docx import Document
             from docx.oxml.table import CT_Tbl
@@ -851,9 +855,7 @@ class WordSplitter(DocumentSplitter):
             self.CT_Tbl = CT_Tbl
             self.CT_P = CT_P
         except ImportError as e:
-            print(f"❌ 缺少依赖: {e}")
-            print("请安装: pip install python-docx")
-            sys.exit(1)
+            raise ImportError(f"缺少依赖 python-docx: {e}。请安装: pip install python-docx") from e
     
     def process(self, word_path: Path, output_dir: Path) -> DocumentInfo:
         """
@@ -866,7 +868,7 @@ class WordSplitter(DocumentSplitter):
         Returns:
             文档信息
         """
-        print(f"📝 处理Word文档: {word_path.name}")
+        Logger.info(f"处理Word文档: {word_path.name}")
         
         # 创建输出目录结构
         doc_dir = output_dir
@@ -880,9 +882,9 @@ class WordSplitter(DocumentSplitter):
         try:
             doc = self.Document(word_path)
         except Exception as e:
-            error_msg = f"⚠️  无法打开Word文档（可能已损坏或不是有效的 .docx 文件）: {word_path.name}"
-            print(error_msg)
-            print(f"   错误详情: {e}")
+            error_msg = f"无法打开Word文档（可能已损坏或不是有效的 .docx 文件）: {word_path.name}"
+            Logger.error(error_msg)
+            Logger.error(f"错误详情: {e}", indent=1)
             raise ValueError(error_msg) from e
         
         # 提取文本和图片信息（带占位符）
@@ -930,7 +932,7 @@ class WordSplitter(DocumentSplitter):
         
         self._save_doc_info(doc_info, doc_dir)
         
-        print(f"✅ 完成: {len(chunks)} 个chunks, {images_count} 张图片")
+        Logger.success(f"完成: {len(chunks)} 个chunks, {images_count} 张图片")
         return doc_info
     
     def _extract_text_with_image_placeholders(self, doc, word_path: Path) -> Tuple[str, List[ImageInfo]]:
@@ -995,9 +997,8 @@ class WordSplitter(DocumentSplitter):
                 if table_text:
                     all_elements.append(('table', table_text, False, False, 0))
         
-        # 从配置文件读取上下文提取参数
-        config = load_config()
-        context_config = config.get('doc_splitter', {}).get('context_extraction', {})
+        # 从配置读取上下文提取参数
+        context_config = self.config.get('doc_splitter', {}).get('context_extraction', {})
         
         lookback = context_config.get('word_lookback_paragraphs', 8)
         lookahead = context_config.get('word_lookahead_paragraphs', 5)
@@ -1122,9 +1123,8 @@ class WordSplitter(DocumentSplitter):
         Returns:
             去重后的文本
         """
-        # 从配置文件读取去重参数
-        config = load_config()
-        dedup_config = config.get('doc_splitter', {}).get('text_deduplication', {})
+        # 从配置读取去重参数
+        dedup_config = self.config.get('doc_splitter', {}).get('text_deduplication', {})
         
         # 检查是否启用去重
         if not dedup_config.get('enabled', True):
@@ -1226,7 +1226,7 @@ class WordSplitter(DocumentSplitter):
                     with open(image_path, 'wb') as f:
                         f.write(image_data)
                     
-                    print(f"  🖼️  保存图片: {image_info.smart_filename}")
+                    Logger.info(f"保存图片: {image_info.smart_filename}", indent=1)
                     image_count += 1
         
         # 保存图片信息索引
@@ -1315,7 +1315,9 @@ def generate_output_path(input_path: Path, root_dir: str = "processed",
             return input_path.parent / doc_name
 
 
-def process_document(input_path: Path, output_dir: Path = None, chunk_size: int = 1000, chunk_overlap: int = 200, use_llm_naming: bool = False, batch_timestamp: str = None) -> Optional[DocumentInfo]:
+def process_document(input_path: Path, output_dir: Path = None, chunk_size: int = 1000,
+                     chunk_overlap: int = 200, use_llm_naming: bool = False,
+                     batch_timestamp: str = None, config: dict = None) -> Optional[DocumentInfo]:
     """
     处理单个文档（使用LangChain语义拆分）
     
@@ -1326,15 +1328,18 @@ def process_document(input_path: Path, output_dir: Path = None, chunk_size: int 
         chunk_overlap: chunk重叠大小（默认200字符，推荐15-20%）
         use_llm_naming: 是否使用 LLM 智能生成图片名称（默认False）
         batch_timestamp: 批次时间戳（同一批次共用；None 则自动生成）
+        config: 处理器配置字典（None 则自动加载）
         
     Returns:
         文档信息，失败返回None
     """
+    if config is None:
+        config = load_config()
+
     suffix = input_path.suffix.lower()
     
     # 如果没有指定输出目录，从配置中生成
     if output_dir is None:
-        config = load_config()
         output_config = config.get('doc_splitter', {}).get('output', {})
         root_dir = output_config.get('root_dir', 'processed')
         structure = output_config.get('structure', 'nested')
@@ -1344,23 +1349,23 @@ def process_document(input_path: Path, output_dir: Path = None, chunk_size: int 
     
     try:
         if suffix == '.pdf':
-            splitter = PDFSplitter(chunk_size, chunk_overlap, use_llm_naming)
+            splitter = PDFSplitter(chunk_size, chunk_overlap, use_llm_naming, config=config)
             return splitter.process(input_path, output_dir)
         elif suffix in ['.docx', '.doc']:
             if suffix == '.doc':
-                print(f"⚠️  .doc格式需要转换为.docx，跳过: {input_path.name}")
+                Logger.warning(f".doc格式需要转换为.docx，跳过: {input_path.name}")
                 return None
-            splitter = WordSplitter(chunk_size, chunk_overlap, use_llm_naming)
+            splitter = WordSplitter(chunk_size, chunk_overlap, use_llm_naming, config=config)
             return splitter.process(input_path, output_dir)
         else:
-            print(f"⚠️  不支持的文件格式: {suffix}")
+            Logger.warning(f"不支持的文件格式: {suffix}")
             return None
     except ValueError as e:
         # 已经在内部处理过的错误（如损坏的文档），只打印错误信息
-        print(f"❌ 跳过: {input_path.name} - {e}")
+        Logger.warning(f"跳过: {input_path.name} - {e}")
         return None
     except Exception as e:
-        print(f"❌ 处理失败 {input_path.name}: {e}")
+        Logger.error(f"处理失败 {input_path.name}: {e}")
         import traceback
         traceback.print_exc()
         return None

@@ -1,37 +1,53 @@
 # ============================================================
-# 飞书文档自动同步 - 配置文件（模板）
-# 复制为 feishu.yaml 并填入实际值
+# 飞书文档自动同步 - 配置文件模板
 # 由系统定时任务（Windows 任务计划程序）调度执行
+# 复制本文件为 feishu.yaml 并填入实际值
 # ============================================================
 
 feishu:
   # -------------------- 飞书应用凭证 --------------------
-  app_id: "<YOUR_APP_ID>"                  # 飞书应用 App ID
-  app_secret: "<YOUR_APP_SECRET>"          # 飞书应用 App Secret
-  base_url: "https://open.feishu.cn"       # 飞书 API 地址（私有化部署可改）
+  app_id: "YOUR_APP_ID"                  # 飞书应用 App ID
+  app_secret: "YOUR_APP_SECRET"          # 飞书应用 App Secret
+  base_url: "https://open.feishu.cn"     # 飞书 API 地址（私有化部署可改）
 
   # -------------------- 输出目录 --------------------
+  # 文档下载到哪个目录（支持绝对路径和相对路径，相对路径基于 auto-doc/ 目录）
+  # 留空则使用默认值: <项目根>/feishu_exports
+  # "../" = auto-doc 的上层目录（doctment/），脚本工程和文档放在一起
   output_dir: "../"
 
   # -------------------- 同步范围 --------------------
+  # 指定要同步的知识空间 ID 列表（空 = 遍历全部有权限的知识空间）
   space_ids: []
+  # space_ids:
+  #   - "7613735903789370589"
+  #   - "7613735903789370590"
 
   # -------------------- 日志配置 --------------------
   log:
-    level: "INFO"
-    dir: ""
+    level: "INFO"             # 日志级别: DEBUG / INFO / WARNING / ERROR
+    dir: ""                   # 日志目录（留空 = <项目根>/logs）
 
   # -------------------- 导出参数 --------------------
   export:
-    poll_max_wait: 60
-    poll_interval: 2
-    poll_initial_delay: 3
+    # 导出任务轮询参数
+    poll_max_wait: 60         # 导出任务最大等待时间（秒）
+    poll_interval: 2          # 轮询间隔（秒）
+    poll_initial_delay: 3     # 创建任务后的初始等待时间（秒）
+
+    # 限速：两次导出之间的间隔（秒），防止触发飞书频率限制
     rate_limit_delay: 1
+
+    # 文档类型 → 导出格式映射
+    # 支持的类型: doc, docx, sheet, bitable
+    # 支持的格式: docx, pdf, xlsx, csv
     type_format_map:
       doc: "docx"
       docx: "docx"
-      sheet: "xlsx"
-      bitable: "xlsx"
+      # sheet: "xlsx"       # 项目不处理 Excel，如需启用请取消注释
+      # bitable: "xlsx"
+
+    # 不可导出的文档类型（遇到直接跳过，不报错）
     skip_types:
       - "mindnote"
       - "file"
@@ -39,17 +55,19 @@ feishu:
       - "catalog"
 
   # -------------------- 向量化入库 --------------------
+  # 下载文档后自动触发文档处理管线（拆分 → 向量化 → 存入 pgvector）
+  # 向量模型 / 分块参数统一在 doc_splitter.yaml 的 embedding 和 text_splitter 中配置
+  # 数据库连接配置见 configs/db_info.yml
   vectorize:
-    enabled: true
-    model_path: "models/models--BAAI--bge-small-zh-v1.5/snapshots/7999e1d3359715c523056ef9478215996d62a620"
-    chunk_size: 500
-    chunk_overlap: 50
+    enabled: true               # 是否启用向量化入库（仅开关，参数见 doc_splitter.yaml）
 
   # -------------------- 增量清单 --------------------
   manifest:
+    # 增量下载清单文件路径（留空 = <项目根>/.feishu_export_manifest.json）
     path: ""
 
   # -------------------- 进程锁 --------------------
   lock:
+    # 进程锁文件路径（留空 = <项目根>/.feishu_export.lock）
     path: ""
 

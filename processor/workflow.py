@@ -17,11 +17,19 @@ from .storage import PgVectorStorage
 class BatchWorkflow:
     """批量工作流"""
     
-    def __init__(self, use_llm_naming: bool = False, db_config: dict = None):
-        """初始化批量工作流"""
-        self.config = load_config()
+    def __init__(self, use_llm_naming: bool = False, db_config: dict = None,
+                 config: dict = None):
+        """
+        初始化批量工作流
+
+        Args:
+            use_llm_naming: 是否使用 LLM 图片命名
+            db_config: 数据库配置（None 则从 config 中取）
+            config: 处理器配置字典（None 则自动加载）
+        """
+        self.config = config if config is not None else load_config()
         self.use_llm_naming = use_llm_naming
-        self.embedding_generator = EmbeddingGenerator()
+        self.embedding_generator = EmbeddingGenerator(config=self.config)
         
         # 数据库存储
         _db_cfg = db_config or self.config.get('database', {})
@@ -59,13 +67,15 @@ class BatchWorkflow:
         
         return documents
     
-    def process_single_document(self, doc_path: Path, batch_timestamp: str = None) -> Optional[Dict[str, Any]]:
+    def process_single_document(self, doc_path: Path, batch_timestamp: str = None,
+                                doc_meta: Dict[str, Any] = None) -> Optional[Dict[str, Any]]:
         """
         处理单个文档
         
         Args:
             doc_path: 文档路径
             batch_timestamp: 批次时间戳（同一批次共用；None 则自动生成）
+            doc_meta: 文档来源元数据（如 space_id, source_url），用于写入 pgvector
         """
         Logger.separator()
         Logger.info(f"处理文档: {doc_path.name}")
@@ -95,7 +105,8 @@ class BatchWorkflow:
             doc_info = process_document(
                 input_path=doc_path,
                 output_dir=output_path,
-                use_llm_naming=self.use_llm_naming
+                use_llm_naming=self.use_llm_naming,
+                config=self.config,
             )
             
             if doc_info:
@@ -164,12 +175,15 @@ class BatchWorkflow:
                 Logger.info("步骤3：存入 PostgreSQL...")
                 try:
                     self.vector_storage.init_table()
+                    _meta = doc_meta or {}
                     dir_info = {
                         'doc_name': doc_data['doc_name'],
                         'timestamp': doc_data['timestamp'],
                         'embeddings_dir': output_path / 'embeddings',
                         'metadata_dir': output_path / 'metadata',
                         'chunks_dir': output_path / 'chunks',
+                        'space_id': _meta.get('space_id', ''),
+                        'source_url': _meta.get('source_url', ''),
                     }
                     stored = self.vector_storage.store_document(dir_info)
                     result['step3_store'] = {

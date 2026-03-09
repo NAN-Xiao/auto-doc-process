@@ -60,18 +60,22 @@ lightrag:
     enable_llm_cache: true               # 启用 LLM 结果缓存
 
   # -----------------------------------------
-  # 存储后端（LightRAG 内部存储）
-  # 使用本地存储，构建完成后导出到 PostgreSQL
+  # 存储后端（LightRAG 内部存储 → 全部本地文件）
+  #
+  # 另一个 RAG 工程通过监控 lightrag_workspace/ 目录下的文件变化
+  # 来感知数据更新，写入完成后读取最新内容，无需加锁。
+  #
+  # 构建完成后额外导出实体/关系到 PostgreSQL（pg_export）作为二次备份。
   # -----------------------------------------
   storage:
     kv: "JsonKVStorage"                  # KV 存储（JSON 文件）
     vector: "NanoVectorDBStorage"        # 向量存储（本地 NanoVectorDB）
-    graph: "NetworkXStorage"             # 图存储（本地 NetworkX）
+    graph: "NetworkXStorage"             # 图存储（本地 NetworkX graphml）
     doc_status: "JsonDocStatusStorage"   # 文档状态（JSON 文件）
 
   # -----------------------------------------
   # PostgreSQL 图谱导出配置
-  # 构建完成后将实体和关系导出到 PG 表
+  # 构建完成后将实体和关系导出到 PG 表（二次备份）
   # 数据库连接复用 db_info.yml
   # -----------------------------------------
   pg_export:

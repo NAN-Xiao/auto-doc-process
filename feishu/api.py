@@ -17,12 +17,27 @@ import os
 import json
 import time
 import requests
+from tenacity import (
+    retry, stop_after_attempt, wait_exponential,
+    retry_if_exception_type, before_sleep_log,
+)
+import logging
 
 from ..core.config import log
+
+# tenacity 日志：重试前打印到 feishu_sync logger
+_tenacity_logger = logging.getLogger("feishu_sync")
 
 
 # ==================== Token ====================
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    retry=retry_if_exception_type((requests.ConnectionError, requests.Timeout)),
+    before_sleep=before_sleep_log(_tenacity_logger, logging.WARNING),
+    reraise=True,
+)
 def get_tenant_access_token(config: dict) -> str:
     """
     获取 tenant_access_token（应用身份）
@@ -78,6 +93,13 @@ def create_lark_client(config: dict):
 
 # ==================== Wiki 解析 ====================
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    retry=retry_if_exception_type((requests.ConnectionError, requests.Timeout)),
+    before_sleep=before_sleep_log(_tenacity_logger, logging.WARNING),
+    reraise=True,
+)
 def resolve_wiki_token(config: dict, wiki_token: str) -> tuple:
     """
     解析 Wiki 文档的真实 token 和类型
@@ -116,6 +138,13 @@ def resolve_wiki_token(config: dict, wiki_token: str) -> tuple:
 
 # ==================== 知识空间发现 ====================
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    retry=retry_if_exception_type((requests.ConnectionError, requests.Timeout)),
+    before_sleep=before_sleep_log(_tenacity_logger, logging.WARNING),
+    reraise=True,
+)
 def list_wiki_spaces(access_token: str, base_url: str = "https://open.feishu.cn") -> list:
     """
     列出机器人有权限的所有知识空间
@@ -162,6 +191,13 @@ def list_wiki_spaces(access_token: str, base_url: str = "https://open.feishu.cn"
     return spaces
 
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    retry=retry_if_exception_type((requests.ConnectionError, requests.Timeout)),
+    before_sleep=before_sleep_log(_tenacity_logger, logging.WARNING),
+    reraise=True,
+)
 def list_wiki_nodes(access_token: str, space_id: str,
                     parent_node_token: str = None,
                     depth: int = 0, max_depth: int = 10,

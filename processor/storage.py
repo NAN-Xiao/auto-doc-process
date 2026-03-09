@@ -69,6 +69,43 @@ class PgVectorStorage:
         ON doc_chunks USING hnsw (embedding vector_cosine_ops);
     """
 
+    # 增量 DDL：为已有表添加新列（幂等）
+    DDL_ADD_SOURCE_COLUMNS = """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'space_id'
+        ) THEN
+            ALTER TABLE doc_chunks ADD COLUMN space_id TEXT NOT NULL DEFAULT '';
+            CREATE INDEX IF NOT EXISTS idx_doc_chunks_space_id ON doc_chunks (space_id);
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'source_url'
+        ) THEN
+            ALTER TABLE doc_chunks ADD COLUMN source_url TEXT NOT NULL DEFAULT '';
+        END IF;
+    END
+    $$;
+    """
+
+    # 全文检索索引（BM25/关键词匹配）
+    DDL_FULLTEXT_INDEX = """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_indexes
+            WHERE indexname = 'idx_doc_chunks_fulltext'
+        ) THEN
+            -- chunk_text 列添加 GIN 全文检索索引（简体中文 + 默认分词）
+            CREATE INDEX idx_doc_chunks_fulltext
+                ON doc_chunks USING gin (to_tsvector('simple', chunk_text));
+        END IF;
+    END
+    $$;
+    """
+
     def __init__(self, db_config: dict = None, vector_dim: int = 512):
         """
         初始化
@@ -94,14 +131,14 @@ class PgVectorStorage:
 
     # -------------------- 连接 --------------------
 
-    def _get_conn(self):
+    def _get_conn(self, autocommit: bool = False):
         conn = psycopg.connect(
             host=self.db_config.get("host", "localhost"),
             port=self.db_config.get("port", 5432),
             dbname=self.db_config.get("database", ""),
             user=self.db_config.get("user", ""),
             password=self.db_config.get("password", ""),
-            autocommit=True,
+            autocommit=autocommit,
         )
         register_vector(conn)
         return conn
@@ -109,11 +146,15 @@ class PgVectorStorage:
     # -------------------- 建表 --------------------
 
     def init_table(self):
-        """创建表和索引（幂等）"""
-        conn = self._get_conn()
+        """创建表和索引（幂等），并执行增量迁移"""
+        conn = self._get_conn(autocommit=True)
         try:
             with conn.cursor() as cur:
                 cur.execute(self.DDL_INIT.format(dim=self.vector_dim))
+                # 增量迁移：为已有表添加 space_id / source_url 列
+                cur.execute(self.DDL_ADD_SOURCE_COLUMNS)
+                # 全文检索索引（支持 BM25 关键词匹配）
+                cur.execute(self.DDL_FULLTEXT_INDEX)
             Logger.info("数据库表 doc_chunks 就绪")
         finally:
             conn.close()
@@ -121,7 +162,7 @@ class PgVectorStorage:
     def reset_table(self):
         """删除重建表"""
         Logger.warning("重建表 doc_chunks")
-        conn = self._get_conn()
+        conn = self._get_conn(autocommit=True)
         try:
             with conn.cursor() as cur:
                 cur.execute("DROP TABLE IF EXISTS doc_chunks CASCADE")
@@ -175,6 +216,8 @@ class PgVectorStorage:
                 "image_count": raw_meta.get("image_count", 0),
                 "images_json": json.dumps(images_list, ensure_ascii=False) if images_list else "[]",
                 "source_file": raw_meta.get("source", ""),
+                "space_id": dir_info.get("space_id", ""),
+                "source_url": dir_info.get("source_url", ""),
                 "embedding": emb_data["embedding"],
                 "processed_at": raw_meta.get("processed_at", ""),
             }
@@ -184,11 +227,16 @@ class PgVectorStorage:
 
     # -------------------- 写入 --------------------
 
-    def _delete_doc(self, cur, doc_name: str, timestamp: str):
-        """删除指定文档 + 时间戳的旧数据"""
+    def _delete_doc(self, cur, doc_name: str, timestamp: str = None):
+        """
+        删除指定文档的旧数据
+
+        行为：按 doc_name 删除该文档的 **所有** 旧版本 chunks，
+        确保同一文档不会因多次处理而产生重复数据。
+        """
         cur.execute(
-            "DELETE FROM doc_chunks WHERE doc_name = %s AND doc_timestamp = %s",
-            (doc_name, timestamp),
+            "DELETE FROM doc_chunks WHERE doc_name = %s",
+            (doc_name,),
         )
 
     def store_document(self, dir_info: Dict[str, Any]) -> int:
@@ -219,32 +267,35 @@ class PgVectorStorage:
         Logger.info(f"加载了 {len(chunks)} 个有效 chunks", indent=1)
 
         now = datetime.now()
-        conn = self._get_conn()
+        conn = self._get_conn()  # autocommit=False → 事务模式
         try:
-            with conn.cursor() as cur:
-                # 先删旧数据
-                self._delete_doc(cur, dir_info["doc_name"], dir_info["timestamp"])
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    # 先删旧数据
+                    self._delete_doc(cur, dir_info["doc_name"], dir_info["timestamp"])
 
-                for c in chunks:
-                    cur.execute(
-                        """
-                        INSERT INTO doc_chunks
-                            (doc_name, doc_format, doc_timestamp, chunk_id, chunk_index,
-                             chunk_text, char_count, page_number, has_images, image_count,
-                             images_json, source_file, embedding, processed_at,
-                             created_at, updated_at)
-                        VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s)
-                        """,
-                        (
-                            c["doc_name"], c["doc_format"], c["doc_timestamp"],
-                            c["chunk_id"], c["chunk_index"],
-                            c["chunk_text"], c["char_count"], c["page_number"],
-                            c["has_images"], c["image_count"],
-                            c["images_json"], c["source_file"],
-                            c["embedding"], c["processed_at"],
-                            now, now,
-                        ),
-                    )
+                    for c in chunks:
+                        cur.execute(
+                            """
+                            INSERT INTO doc_chunks
+                                (doc_name, doc_format, doc_timestamp, chunk_id, chunk_index,
+                                 chunk_text, char_count, page_number, has_images, image_count,
+                                 images_json, source_file, space_id, source_url,
+                                 embedding, processed_at,
+                                 created_at, updated_at)
+                            VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s)
+                            """,
+                            (
+                                c["doc_name"], c["doc_format"], c["doc_timestamp"],
+                                c["chunk_id"], c["chunk_index"],
+                                c["chunk_text"], c["char_count"], c["page_number"],
+                                c["has_images"], c["image_count"],
+                                c["images_json"], c["source_file"],
+                                c["space_id"], c["source_url"],
+                                c["embedding"], c["processed_at"],
+                                now, now,
+                            ),
+                        )
 
             Logger.success(f"成功存储 {len(chunks)} chunks", indent=1)
 

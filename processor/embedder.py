@@ -20,18 +20,22 @@ from typing import List, Dict, Any
 from datetime import datetime
 
 from ..core.config import load_processor_config as load_config
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from ..core.logger import Logger
+from langchain_huggingface import HuggingFaceEmbeddings
 
 
 class EmbeddingGenerator:
     """Embedding 生成器"""
     
-    def __init__(self):
+    def __init__(self, config: dict = None):
         """
         初始化
+
+        Args:
+            config: 处理器配置字典（None 则自动加载）
         """
-        # 加载配置
-        self.config = load_config()
+        # 配置注入：优先使用传入的 config
+        self.config = config if config is not None else load_config()
         
         # 初始化 embedding 模型
         embedding_config = self.config.get('embedding', {})
@@ -43,8 +47,8 @@ class EmbeddingGenerator:
         device = hf_config.get('device', 'cpu')
         normalize_embeddings = hf_config.get('normalize_embeddings', True)
         
-        print(f"📦 加载 Embedding 模型: {model_name} (device: {device})")
-        print(f"📁 模型缓存目录: {cache_folder}")
+        Logger.info(f"加载 Embedding 模型: {model_name} (device: {device})")
+        Logger.info(f"模型缓存目录: {cache_folder}", indent=1)
         
         self.embeddings = HuggingFaceEmbeddings(
             model_name=model_name,
@@ -53,7 +57,7 @@ class EmbeddingGenerator:
             encode_kwargs={'normalize_embeddings': normalize_embeddings}
         )
         
-        print(f"💾 Embeddings 将保存到各文档的 processed 目录\n")
+        Logger.info("Embeddings 将保存到各文档的 processed 目录")
         
     def extract_image_references(self, chunk_text: str) -> List[str]:
         """
@@ -140,7 +144,7 @@ class EmbeddingGenerator:
         Returns:
             添加的 chunk 数量
         """
-        print(f"\n📄 处理文档: {doc_data['doc_name']} ({doc_data['timestamp']})")
+        Logger.info(f"处理文档: {doc_data['doc_name']} ({doc_data['timestamp']})")
         
         # 在 processed 目录下创建 embeddings 和 metadata 子目录
         # 路径：processed/时间戳/文档名/embeddings/ 和 metadata/
@@ -169,15 +173,15 @@ class EmbeddingGenerator:
             ids.append(f"{doc_data['doc_name']}_{doc_data['timestamp']}_{chunk_info['chunk_id']}")
         
         if not texts:
-            print("  ⚠️  没有有效的 chunks")
+            Logger.warning("没有有效的 chunks", indent=1)
             return 0
         
         # 生成 embeddings
-        print(f"  📊 生成 {len(texts)} 个 embeddings...")
+        Logger.info(f"生成 {len(texts)} 个 embeddings...", indent=1)
         embeddings = self.embeddings.embed_documents(texts)
         
         # 每个 chunk 分别保存 embedding 和 metadata
-        print(f"  💾 保存 embeddings 和 metadata（每个 chunk 单独文件）...")
+        Logger.info("保存 embeddings 和 metadata（每个 chunk 单独文件）...", indent=1)
         
         for i in range(len(texts)):
             chunk_idx = chunk_indices[i]
@@ -208,17 +212,17 @@ class EmbeddingGenerator:
             with open(metadata_file, 'w', encoding='utf-8') as f:
                 json.dump(metadata_full, f, ensure_ascii=False, indent=2)
         
-        print(f"  ✅ 成功保存 {len(texts)} 个 embeddings")
-        print(f"  📁 Embeddings: {embeddings_dir}")
-        print(f"  📁 Metadata: {metadata_dir}")
+        Logger.success(f"成功保存 {len(texts)} 个 embeddings", indent=1)
+        Logger.info(f"Embeddings: {embeddings_dir}", indent=1)
+        Logger.info(f"Metadata: {metadata_dir}", indent=1)
         
         # 统计图片信息
         chunks_with_images = sum(1 for m in metadatas if m['has_images'])
         total_images = sum(m['image_count'] for m in metadatas)
         
         if chunks_with_images > 0:
-            print(f"  🖼️  包含图片的 chunks: {chunks_with_images}")
-            print(f"  🖼️  图片引用总数: {total_images}")
+            Logger.info(f"包含图片的 chunks: {chunks_with_images}", indent=1)
+            Logger.info(f"图片引用总数: {total_images}", indent=1)
         
         return len(texts)
 

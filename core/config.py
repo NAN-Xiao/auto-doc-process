@@ -18,6 +18,11 @@ from pathlib import Path
 from datetime import datetime
 
 
+class ConfigError(Exception):
+    """配置加载失败时抛出的异常"""
+    pass
+
+
 # ==================== 路径常量 ====================
 
 # core/ 的父目录 → auto-doc/
@@ -51,9 +56,14 @@ def setup_logging(log_level: str = "INFO", log_dir: str = "") -> logging.Logger:
 
     logger = logging.getLogger("feishu_sync")
     logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+    logger.propagate = False  # 不传播到 root logger，避免重复输出
 
     # 避免重复添加 handler
     if logger.handlers:
+        # 更新已有 handler 的级别
+        for h in logger.handlers:
+            if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+                h.setLevel(getattr(logging, log_level.upper(), logging.INFO))
         return logger
 
     fmt = logging.Formatter(
@@ -107,8 +117,7 @@ def _find_config_file(config_path: str = None) -> Path:
         path = Path(config_path)
         if path.exists():
             return path
-        log.error(f"配置文件不存在: {path}")
-        sys.exit(1)
+        raise ConfigError(f"配置文件不存在: {path}")
 
     candidates = [
         CONFIGS_DIR / "feishu.yaml",
@@ -118,8 +127,7 @@ def _find_config_file(config_path: str = None) -> Path:
     ]
     path = next((c for c in candidates if c.exists()), None)
     if not path:
-        log.error(f"找不到配置文件，已尝试: {[str(c) for c in candidates]}")
-        sys.exit(1)
+        raise ConfigError(f"找不到配置文件，已尝试: {[str(c) for c in candidates]}")
     return path
 
 
@@ -192,8 +200,8 @@ def load_full_config(config_path: str = None) -> dict:
             "rate_limit_delay", "type_format_map", "skip_types",
             # 清单 & 锁
             "manifest_path", "lock_path",
-            # 向量化
-            "vec_enabled", "model_path", "chunk_size", "chunk_overlap",
+            # 向量化（仅开关，模型/分块参数见 doc_splitter.yaml）
+            "vec_enabled",
             # 数据库
             "db",
         }
@@ -246,22 +254,9 @@ def load_full_config(config_path: str = None) -> dict:
     # 知识空间 ID 列表
     space_ids = feishu.get("space_ids", [])
 
-    # 向量化配置
+    # 向量化开关（模型 / 分块参数统一在 doc_splitter.yaml）
     vec_cfg = feishu.get("vectorize", {})
     vec_enabled = vec_cfg.get("enabled", True)
-
-    # 模型路径（相对路径基于 MODULE_DIR）
-    model_path_raw = vec_cfg.get(
-        "model_path",
-        "models/models--BAAI--bge-small-zh-v1.5/snapshots/"
-        "7999e1d3359715c523056ef9478215996d62a620",
-    )
-    model_path = Path(model_path_raw)
-    if not model_path.is_absolute():
-        model_path = (MODULE_DIR / model_path).resolve()
-
-    chunk_size = vec_cfg.get("chunk_size", 500)
-    chunk_overlap = vec_cfg.get("chunk_overlap", 50)
 
     # 加载数据库配置
     db_config = load_db_config()
@@ -288,11 +283,8 @@ def load_full_config(config_path: str = None) -> dict:
         # 清单 & 锁
         "manifest_path": manifest_path,
         "lock_path": lock_path,
-        # 向量化
+        # 向量化（仅开关，模型/分块参数见 doc_splitter.yaml）
         "vec_enabled": vec_enabled,
-        "model_path": str(model_path),
-        "chunk_size": chunk_size,
-        "chunk_overlap": chunk_overlap,
         # 数据库
         "db": db_config,
     }

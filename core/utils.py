@@ -6,11 +6,12 @@
 职责：
   - 飞书文档 URL 解析
   - 安全文件名生成
-  - 进程锁（防止重复运行）
+  - 进程锁（防止重复运行，使用 OS 级文件锁消除竞态条件）
   - 文档类型常量（默认值，可被配置覆盖）
 """
 
 import os
+import sys
 import re
 import json
 from pathlib import Path
@@ -74,11 +75,17 @@ def safe_filename(name: str, fallback: str) -> str:
     return s or fallback
 
 
-# ==================== 进程锁 ====================
+# ==================== 进程锁（OS 级文件锁） ====================
+
+# 全局持有锁文件句柄，防止被 GC 关闭
+_lock_file_handle = None
+
 
 def acquire_lock(lock_path: Path = None) -> bool:
     """
-    获取进程锁，防止重复运行
+    获取进程锁，防止重复运行。
+
+    使用 OS 级别文件锁（Windows: msvcrt, POSIX: fcntl）消除 TOCTOU 竞态条件。
 
     Args:
         lock_path: 锁文件路径（None 使用默认路径）
@@ -86,38 +93,72 @@ def acquire_lock(lock_path: Path = None) -> bool:
     Returns:
         True = 获取成功，False = 已有实例在运行
     """
+    global _lock_file_handle
     lock_file = lock_path or DEFAULT_LOCK_PATH
 
-    if lock_file.exists():
-        try:
-            with open(lock_file, "r") as f:
-                info = json.load(f)
-            pid = info.get("pid", 0)
-            start_time = info.get("start_time", "")
-
-            try:
-                os.kill(pid, 0)  # 仅检查进程是否存在
-                log.warning(f"另一个实例正在运行 (PID={pid}, 启动于 {start_time})")
-                return False
-            except (OSError, ProcessLookupError):
-                log.info(f"清理残留锁文件 (旧 PID={pid})")
-        except (json.JSONDecodeError, IOError):
-            pass
-
     try:
-        with open(lock_file, "w") as f:
-            json.dump({"pid": os.getpid(), "start_time": datetime.now().isoformat()}, f)
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        # 以读写模式打开（不存在则创建）
+        fh = open(lock_file, "w")
+
+        if sys.platform == "win32":
+            import msvcrt
+            try:
+                # 非阻塞独占锁（锁定第一个字节即可）
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            except (OSError, IOError):
+                fh.close()
+                log.warning("另一个实例正在运行（无法获取文件锁）")
+                return False
+        else:
+            import fcntl
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except (OSError, IOError):
+                fh.close()
+                log.warning("另一个实例正在运行（无法获取文件锁）")
+                return False
+
+        # 锁定成功，写入进程信息
+        fh.truncate(0)
+        fh.seek(0)
+        json.dump({"pid": os.getpid(), "start_time": datetime.now().isoformat()}, fh)
+        fh.flush()
+
+        # 保持句柄打开（锁依赖于文件句柄的生命周期）
+        _lock_file_handle = fh
         return True
-    except IOError as e:
-        log.error(f"无法创建锁文件: {e}")
+
+    except Exception as e:
+        log.error(f"无法获取进程锁: {e}")
         return False
 
 
 def release_lock(lock_path: Path = None):
     """释放进程锁"""
+    global _lock_file_handle
     lock_file = lock_path or DEFAULT_LOCK_PATH
+
+    if _lock_file_handle is not None:
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                try:
+                    _lock_file_handle.seek(0)
+                    msvcrt.locking(_lock_file_handle.fileno(), msvcrt.LK_UNLCK, 1)
+                except (OSError, IOError):
+                    pass
+            else:
+                import fcntl
+                fcntl.flock(_lock_file_handle.fileno(), fcntl.LOCK_UN)
+            _lock_file_handle.close()
+        except Exception:
+            pass
+        _lock_file_handle = None
+
+    # 尝试删除锁文件
     try:
         if lock_file.exists():
             lock_file.unlink()
-    except IOError:
+    except OSError:
         pass

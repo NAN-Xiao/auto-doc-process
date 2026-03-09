@@ -15,7 +15,7 @@ lxml>=5.0.0              # python-docx 依赖
 langchain-text-splitters>=1.0.0
 langchain-core>=1.0.0
 langchain-openai>=1.0.0  # ChatOpenAI（DeepSeek LLM 图片命名）
-langchain-community>=0.4.0  # HuggingFaceEmbeddings
+langchain-huggingface>=1.0.0  # HuggingFaceEmbeddings（替代已弃用的 langchain-community）
 
 # --- Embedding 模型 ---
 sentence-transformers>=3.0.0   # BAAI/bge-small-zh-v1.5
@@ -32,6 +32,9 @@ tiktoken>=0.7.0           # token 计数
 
 # --- LightRAG 知识图谱 ---
 lightrag-hku>=1.4.0          # LightRAG 图谱构建框架
+
+# --- 重试 ---
+tenacity>=8.2.0
 
 # --- 配置 ---
 PyYAML>=6.0

@@ -11,9 +11,11 @@ LightRAG 知识图谱构建器
 工作流程：
   processed/ 目录（已拆分的 chunks）
     ↓
-  LightRAG 处理（LLM 实体关系抽取 → 图谱构建）
+  LightRAG 处理（LLM 实体关系抽取 → 图谱构建 → 写入本地 JSON/graphml）
     ↓
-  PostgreSQL 存储（lightrag_entities + lightrag_relations + lightrag_chunks）
+  另一个 RAG 工程监控 lightrag_workspace/ 文件变化，写入完成后读取最新内容
+    ↓
+  PostgreSQL 导出（lightrag_entities + lightrag_relations + lightrag_chunks 二次备份）
 
 依赖：
   - lightrag-hku >= 1.4.0
@@ -24,21 +26,27 @@ LightRAG 知识图谱构建器
 import os
 import json
 import asyncio
+import logging
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-from functools import partial
 
 import numpy as np
 import psycopg
 from pgvector.psycopg import register_vector
+from tenacity import (
+    retry, stop_after_attempt, wait_exponential,
+    retry_if_exception_type, before_sleep_log,
+)
 
-from lightrag import LightRAG, QueryParam
+from lightrag import LightRAG
 from lightrag.llm.openai import openai_complete_if_cache
 from lightrag.utils import EmbeddingFunc, always_get_an_event_loop
 
 from ..core.config import load_processor_config, load_db_config, CONFIGS_DIR
 from ..core.logger import Logger
+
+_tenacity_logger = logging.getLogger("feishu_sync")
 
 
 # ==================== 配置加载 ====================
@@ -101,7 +109,7 @@ def _create_local_embedding_func(config: dict) -> EmbeddingFunc:
     Returns:
         EmbeddingFunc 实例
     """
-    from langchain_community.embeddings import HuggingFaceEmbeddings
+    from langchain_huggingface import HuggingFaceEmbeddings
 
     emb_cfg = config.get("embedding", {})
     model_name = emb_cfg.get("model", "BAAI/bge-small-zh-v1.5")
@@ -159,6 +167,13 @@ def _create_llm_func(config: dict):
     os.environ.setdefault("OPENAI_API_KEY", api_key)
     os.environ.setdefault("OPENAI_API_BASE", api_base)
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=60),
+        retry=retry_if_exception_type((Exception,)),
+        before_sleep=before_sleep_log(_tenacity_logger, logging.WARNING),
+        reraise=True,
+    )
     async def _llm_complete(
         prompt: str,
         system_prompt: str = None,
@@ -166,7 +181,7 @@ def _create_llm_func(config: dict):
         **kwargs,
     ) -> str:
         """
-        DeepSeek LLM 调用（OpenAI 兼容格式）
+        DeepSeek LLM 调用（OpenAI 兼容格式，带自动重试）
 
         注意：LightRAG 内部调用签名为 func(prompt, system_prompt=..., **kwargs)，
         model 已在闭包中绑定。
@@ -184,10 +199,16 @@ def _create_llm_func(config: dict):
     return _llm_complete
 
 
-# ==================== PostgreSQL 图谱导出 ====================
+# ==================== PostgreSQL 图谱导出（二次备份） ====================
 
 class PgGraphExporter:
-    """将 LightRAG 图谱数据导出到 PostgreSQL"""
+    """
+    将 LightRAG 图谱数据导出到 PostgreSQL（二次备份）
+
+    LightRAG 的核心数据存储在本地 JSON/graphml 文件中，
+    另一个 RAG 工程通过监控文件变化来读取。
+    此导出器将实体/关系额外保存到 PG 作为备份和分析用途。
+    """
 
     DDL_ENTITIES = """
     CREATE TABLE IF NOT EXISTS {table} (
@@ -249,21 +270,21 @@ class PgGraphExporter:
         self.vector_dim = export_config.get("vector_dim", 512)
         self.export_embeddings = export_config.get("export_entity_embeddings", True)
 
-    def _get_conn(self):
+    def _get_conn(self, autocommit: bool = False):
         conn = psycopg.connect(
             host=self.db_config.get("host", "localhost"),
             port=self.db_config.get("port", 5432),
             dbname=self.db_config.get("database", ""),
             user=self.db_config.get("user", ""),
             password=self.db_config.get("password", ""),
-            autocommit=True,
+            autocommit=autocommit,
         )
         register_vector(conn)
         return conn
 
     def init_tables(self):
         """创建图谱导出表（幂等）"""
-        conn = self._get_conn()
+        conn = self._get_conn(autocommit=True)
         try:
             with conn.cursor() as cur:
                 # 确保 pgvector 扩展
@@ -293,7 +314,7 @@ class PgGraphExporter:
             embedding_func: 可选的 embedding 函数（用于生成实体向量）
 
         Returns:
-            {"entities": N, "relations": M, "chunks": K}
+            {"entities": N, "relations": M}
         """
         Logger.info("开始导出图谱数据到 PostgreSQL...")
 
@@ -308,53 +329,75 @@ class PgGraphExporter:
         Logger.info(f"图谱节点数: {len(all_nodes)}")
         Logger.info(f"图谱边数: {len(all_edges)}")
 
-        conn = self._get_conn()
+        # ---------- 生成实体 embedding ----------
+        entity_embeddings: Dict[str, list] = {}
+        if self.export_embeddings and embedding_func and all_nodes:
+            Logger.info("为实体生成 embedding...")
+            # 构造用于 embedding 的文本：entity_name + description
+            embed_texts = []
+            embed_keys = []
+            for node in all_nodes:
+                name = node.get("id", "")
+                desc = node.get("description", "")
+                text = f"{name}: {desc}" if desc else name
+                embed_texts.append(text)
+                embed_keys.append(name)
+
+            try:
+                # embedding_func.func 是异步函数，返回 np.ndarray
+                vectors = loop.run_until_complete(embedding_func.func(embed_texts))
+                for key, vec in zip(embed_keys, vectors):
+                    entity_embeddings[key] = vec.tolist() if hasattr(vec, 'tolist') else list(vec)
+                Logger.info(f"已生成 {len(entity_embeddings)} 个实体 embedding")
+            except Exception as e:
+                Logger.warning(f"实体 embedding 生成失败，将跳过: {e}")
+
+        conn = self._get_conn()  # autocommit=False → 事务模式
         entity_count = 0
         relation_count = 0
 
         try:
-            with conn.cursor() as cur:
-                # ---------- 导出实体 ----------
-                for node in all_nodes:
-                    # id 就是 entity_name（由 NetworkXStorage.get_all_nodes 添加）
-                    entity_name = node.get("id", "")
-                    entity_type = node.get("entity_type", "")
-                    description = node.get("description", "")
-                    source_id = node.get("source_id", "")
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    # ---------- 导出实体 ----------
+                    for node in all_nodes:
+                        # id 就是 entity_name（由 NetworkXStorage.get_all_nodes 添加）
+                        entity_name = node.get("id", "")
+                        entity_type = node.get("entity_type", "")
+                        description = node.get("description", "")
+                        source_id = node.get("source_id", "")
 
-                    # 截取 source_doc（source_id 由 GRAPH_FIELD_SEP 分隔）
-                    source_doc = source_id.split("<SEP>")[0] if source_id else ""
+                        # 截取 source_doc（source_id 由 GRAPH_FIELD_SEP 分隔）
+                        source_doc = source_id.split("<SEP>")[0] if source_id else ""
 
-                    try:
+                        emb = entity_embeddings.get(entity_name)
                         cur.execute(
                             f"""
                             INSERT INTO {self.entity_table}
                                 (entity_name, entity_type, description,
-                                 source_doc, source_chunk_id, batch_timestamp)
-                            VALUES (%s, %s, %s, %s, %s, %s)
+                                 source_doc, source_chunk_id, embedding, batch_timestamp)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
                             ON CONFLICT (entity_name, batch_timestamp) DO UPDATE SET
                                 entity_type = EXCLUDED.entity_type,
                                 description = EXCLUDED.description,
                                 source_doc = EXCLUDED.source_doc,
-                                source_chunk_id = EXCLUDED.source_chunk_id
+                                source_chunk_id = EXCLUDED.source_chunk_id,
+                                embedding = EXCLUDED.embedding
                             """,
                             (entity_name, entity_type, description,
-                             source_doc, source_id, batch_timestamp),
+                             source_doc, source_id, emb, batch_timestamp),
                         )
                         entity_count += 1
-                    except Exception as e:
-                        Logger.warning(f"插入实体失败 [{entity_name}]: {e}")
 
-                # ---------- 导出关系 ----------
-                for edge in all_edges:
-                    src = edge.get("source", "")        # NetworkXStorage 添加的字段
-                    tgt = edge.get("target", "")        # NetworkXStorage 添加的字段
-                    rel_type = edge.get("description", "")
-                    weight = edge.get("weight", 1.0)
-                    source_id = edge.get("source_id", "")
-                    keywords = edge.get("keywords", "")
+                    # ---------- 导出关系 ----------
+                    for edge in all_edges:
+                        src = edge.get("source", "")        # NetworkXStorage 添加的字段
+                        tgt = edge.get("target", "")        # NetworkXStorage 添加的字段
+                        rel_type = edge.get("description", "")
+                        weight = edge.get("weight", 1.0)
+                        source_id = edge.get("source_id", "")
+                        keywords = edge.get("keywords", "")
 
-                    try:
                         cur.execute(
                             f"""
                             INSERT INTO {self.relation_table}
@@ -367,8 +410,6 @@ class PgGraphExporter:
                              source_id, batch_timestamp),
                         )
                         relation_count += 1
-                    except Exception as e:
-                        Logger.warning(f"插入关系失败 [{src} -> {tgt}]: {e}")
 
             Logger.success(f"导出完成: {entity_count} 实体, {relation_count} 关系")
 
@@ -398,12 +439,12 @@ class PgGraphExporter:
         if not chunks_data:
             return 0
 
-        conn = self._get_conn()
+        conn = self._get_conn()  # autocommit=False → 事务模式
         count = 0
         try:
-            with conn.cursor() as cur:
-                for chunk in chunks_data:
-                    try:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    for chunk in chunks_data:
                         cur.execute(
                             f"""
                             INSERT INTO {self.chunk_table}
@@ -422,8 +463,6 @@ class PgGraphExporter:
                             ),
                         )
                         count += 1
-                    except Exception as e:
-                        Logger.warning(f"插入 chunk 失败: {e}")
             Logger.info(f"保存 {count} 个 chunks 到 PostgreSQL")
         finally:
             conn.close()
@@ -437,7 +476,9 @@ class LightRAGGraphBuilder:
     """
     LightRAG 知识图谱构建器
 
-    从预处理的文档 chunks 构建知识图谱，并导出到 PostgreSQL。
+    使用本地存储（JSON + NetworkX），另一个 RAG 工程通过监控
+    lightrag_workspace/ 目录下的文件变化来感知数据更新。
+    构建完成后额外导出到 PostgreSQL 作为二次备份。
     """
 
     def __init__(self, config: dict = None):
@@ -501,7 +542,7 @@ class LightRAGGraphBuilder:
             max_graph_nodes=graph_cfg.get("max_graph_nodes", 1000),
             max_parallel_insert=graph_cfg.get("max_parallel_insert", 2),
             enable_llm_cache=graph_cfg.get("enable_llm_cache", True),
-            # 存储后端（使用本地存储，构建完成后导出到 PG）
+            # 本地存储后端（另一个 RAG 工程通过监控文件变化来读取）
             kv_storage=storage_cfg.get("kv", "JsonKVStorage"),
             vector_storage=storage_cfg.get("vector", "NanoVectorDBStorage"),
             graph_storage=storage_cfg.get("graph", "NetworkXStorage"),
@@ -523,6 +564,10 @@ class LightRAGGraphBuilder:
     ) -> Dict[str, Any]:
         """
         从 processed 目录读取所有预处理文档并构建图谱
+
+        流程：
+        1. 扫描文档 → LightRAG insert（实体抽取 + 关系建模 → 写入本地 JSON/graphml）
+        2. 导出到 PostgreSQL（二次备份）
 
         Args:
             processed_batch_dir: 批次处理目录（如 processed/20260306_150640/）
@@ -575,15 +620,18 @@ class LightRAGGraphBuilder:
 
             try:
                 # 使用 LightRAG 的 insert 方法处理文档
-                # LightRAG 会自动进行实体抽取、关系建模
-                track_id = self.rag.insert(
-                    doc_text,
-                    ids=[f"{doc_name}_{batch_timestamp}"],
-                    file_paths=[str(doc_dir)],
+                # LightRAG >= 1.4 的 insert 是异步方法，需通过 event loop 调用
+                loop = always_get_an_event_loop()
+                track_id = loop.run_until_complete(
+                    self.rag.ainsert(
+                        doc_text,
+                        ids=[f"{doc_name}_{batch_timestamp}"],
+                        file_paths=[str(doc_dir)],
+                    )
                 )
                 Logger.success(f"    图谱构建成功 (track_id: {track_id})")
 
-                # 记录 chunk 信息（用于后续导出）
+                # 记录 chunk 信息（用于后续导出到 PG）
                 for chunk in chunks:
                     chunk["doc_name"] = doc_name
                     chunk["full_doc_id"] = f"{doc_name}_{batch_timestamp}"
@@ -600,7 +648,7 @@ class LightRAGGraphBuilder:
             except Exception as e:
                 Logger.error(f"    构建失败: {e}")
                 import traceback
-                traceback.print_exc()
+                Logger.error(traceback.format_exc())
                 doc_results.append({
                     "doc_name": doc_name,
                     "chunks": len(chunks),
@@ -608,7 +656,7 @@ class LightRAGGraphBuilder:
                     "error": str(e),
                 })
 
-        # ---------- 导出到 PostgreSQL ----------
+        # ---------- 导出到 PostgreSQL（二次备份） ----------
         pg_export_cfg = self.config.get("pg_export", {})
         pg_result = {}
 
@@ -616,14 +664,15 @@ class LightRAGGraphBuilder:
             db_cfg = self.config.get("database", {})
             if db_cfg:
                 Logger.separator()
-                Logger.info("导出图谱到 PostgreSQL...")
+                Logger.info("导出图谱到 PostgreSQL（二次备份）...")
 
                 exporter = PgGraphExporter(db_cfg, pg_export_cfg)
                 exporter.init_tables()
 
-                # 导出图谱（实体 + 关系）
+                # 导出图谱（实体 + 关系），传入 embedding 函数以生成实体向量
                 pg_result = exporter.export_graph_data(
                     self.rag, batch_timestamp,
+                    embedding_func=self._embedding_func,
                 )
 
                 # 导出 chunks
@@ -699,34 +748,4 @@ class LightRAGGraphBuilder:
         except Exception as e:
             Logger.error(f"加载 chunks 失败: {e}")
             return []
-
-    def query(self, question: str, mode: str = "hybrid") -> str:
-        """
-        查询知识图谱
-
-        Args:
-            question: 查询问题
-            mode: 查询模式 (naive/local/global/hybrid)
-
-        Returns:
-            回答文本
-        """
-        if self.rag is None:
-            raise RuntimeError("LightRAG 未初始化，请先调用 initialize()")
-
-        return self.rag.query(question, param=QueryParam(mode=mode))
-
-    def export_graph_visualization(self, output_path: str, format: str = "csv"):
-        """
-        导出图谱数据到文件（用于可视化）
-
-        Args:
-            output_path: 输出文件路径
-            format: 输出格式 (csv/excel/md/txt)
-        """
-        if self.rag is None:
-            raise RuntimeError("LightRAG 未初始化，请先调用 initialize()")
-
-        self.rag.export_data(output_path, file_format=format)
-        Logger.info(f"图谱数据已导出: {output_path}")
 

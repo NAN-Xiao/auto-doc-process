@@ -1,20 +1,15 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-飞书文档自动处理管线 - 统一入口
+飞书文档自动处理管线
 
-完整流程（由 Windows 任务计划程序定时调用）：
-  飞书下载 → 预处理（拆分+向量化+pgvector）→ LightRAG 图谱构建 → 导出到 PostgreSQL
+定时批处理：拉取飞书文档 → 拆分/向量化/存库 → 重建图谱 → 导出到 PostgreSQL
 
 用法：
-  python -m auto-doc-process                     → 完整流程：同步 + 预处理 + 图谱构建
-  python -m auto-doc-process sync                → 仅同步飞书文档 + 预处理 + 图谱
-  python -m auto-doc-process sync --dry-run      → 预览模式，只列出不下载
-  python -m auto-doc-process sync --no-graph     → 同步 + 预处理，跳过图谱构建
-  python -m auto-doc-process graph               → 仅构建图谱（处理最新批次）
-  python -m auto-doc-process graph --batch xxx   → 构建指定批次的图谱
-  python -m auto-doc-process query "问题"         → 查询知识图谱
-  python -m auto-doc-process export out.csv      → 导出图谱数据
+  python -m auto-doc-process                  # 全流程
+  python -m auto-doc-process --dry-run        # 预览模式（只列文档不下载）
+  python -m auto-doc-process --full           # 全量同步（忽略增量清单）
+  python -m auto-doc-process --no-graph       # 跳过图谱构建
 """
 
 import sys
@@ -24,24 +19,20 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from .core.config import load_full_config, load_processor_config, log, setup_logging
+from .core.config import load_full_config, load_processor_config, log, setup_logging, ConfigError
 from .core.utils import acquire_lock, release_lock
 
 
-# ==================== 飞书同步 ====================
-
-def run_sync(config: dict, space_id: str = None,
-             full: bool = False, dry_run: bool = False,
+def run_sync(config: dict, full: bool = False, dry_run: bool = False,
              build_graph: bool = True):
     """
-    执行一次飞书文档同步 + 预处理 + 图谱构建
+    飞书文档同步与处理（完整管线）
 
-    Args:
-        config: 完整配置
-        space_id: 指定知识空间（None = 全部）
-        full: 全量模式（忽略增量清单）
-        dry_run: 预览模式（只列出不下载）
-        build_graph: 是否在预处理后构建知识图谱
+    流程：
+      1. 拉取飞书文档列表 → 增量下载 docx/pdf/xlsx
+      2. 拆分 chunks → 向量化 → 生成元数据 → 存入 pgvector
+      3. LightRAG 重建图谱文件（lightrag_workspace/）
+      4. 导出实体/关系到 PostgreSQL
     """
     from .feishu.exporter import discover_documents, batch_export
     from .feishu.api import create_lark_client
@@ -55,7 +46,7 @@ def run_sync(config: dict, space_id: str = None,
 
     if not dry_run:
         if not acquire_lock(lock_path):
-            log.warning("另一个同步任务正在运行，跳过")
+            log.warning("有任务在运行，跳过")
             return
 
     try:
@@ -66,8 +57,8 @@ def run_sync(config: dict, space_id: str = None,
             "type_format_map": config.get("type_format_map"),
         }
 
-        # 发现文档
-        space_ids = [space_id] if space_id else config.get("space_ids", [])
+        # 获取文档列表
+        space_ids = config.get("space_ids", [])
         if space_ids:
             all_entries = []
             for sid in space_ids:
@@ -77,7 +68,7 @@ def run_sync(config: dict, space_id: str = None,
             all_entries = discover_documents(feishu_config)
 
         if not all_entries:
-            log.info("没有发现可导出的文档")
+            log.info("未发现可导出文档")
             return
 
         log.info(f"发现 {len(all_entries)} 个文档")
@@ -87,7 +78,7 @@ def run_sync(config: dict, space_id: str = None,
                      f"{e['token'][:16]}...{name_part}")
 
         if dry_run:
-            log.info("预览模式，不执行下载")
+            log.info("预览模式，未下载")
             return
 
         # 创建 Client
@@ -96,7 +87,6 @@ def run_sync(config: dict, space_id: str = None,
             log.error("创建 SDK Client 失败")
             sys.exit(1)
 
-        # 输出目录
         out_path = config.get("output_dir", Path("feishu_exports"))
 
         # 批量导出
@@ -107,12 +97,11 @@ def run_sync(config: dict, space_id: str = None,
 
         log.info(f"同步完成: 成功={len(success)} 跳过={len(skip)} 失败={len(fail)}")
 
-        # ---- 步骤2：文档处理：拆分 → 向量化 → 存入 PostgreSQL ----
         batch_timestamp = None
 
         if success and config.get("vec_enabled") and config.get("db"):
             log.info("=" * 50)
-            log.info("开始文档处理管线：拆分 → 向量化 → pgvector 入库")
+            log.info("文档处理管线")
             log.info("=" * 50)
 
             from .processor.workflow import BatchWorkflow
@@ -125,7 +114,6 @@ def run_sync(config: dict, space_id: str = None,
                 db_config=config["db"],
             )
 
-            # 同一批次共用时间戳
             batch_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
             proc_success = 0
@@ -136,12 +124,23 @@ def run_sync(config: dict, space_id: str = None,
                     continue
 
                 doc_path = Path(file_path)
-                # 只处理支持的格式
-                if doc_path.suffix.lower() not in (".docx", ".pdf", ".xlsx"):
-                    log.info(f"  跳过不支持的格式: {doc_path.name}")
+                # 仅处理 docx / pdf（项目不处理 Excel）
+                if doc_path.suffix.lower() not in (".docx", ".pdf"):
+                    log.info(f"  跳过: {doc_path.name}")
                     continue
 
-                result = workflow.process_single_document(doc_path, batch_timestamp=batch_timestamp)
+                # 构建来源元数据，传递到 pgvector 存储
+                entry = item.get("entry", {})
+                doc_meta = {
+                    "space_id": entry.get("space_id", ""),
+                    "source_url": entry.get("url", ""),
+                }
+
+                result = workflow.process_single_document(
+                    doc_path, batch_timestamp=batch_timestamp,
+                    doc_meta=doc_meta,
+                )
+
                 if result and result.get("success"):
                     proc_success += 1
                 else:
@@ -150,9 +149,9 @@ def run_sync(config: dict, space_id: str = None,
             log.info(f"文档处理完成: 成功={proc_success} 失败={proc_fail}")
 
         elif success and not config.get("db"):
-            log.info("未配置数据库，跳过文档处理管线")
+            log.info("未配置数据库，跳过文档处理")
 
-        # ---- 步骤3：LightRAG 知识图谱构建 ----
+        # 图谱构建
         if build_graph and batch_timestamp:
             _run_graph_build(batch_timestamp)
 
@@ -168,10 +167,8 @@ def run_sync(config: dict, space_id: str = None,
             release_lock(lock_path)
 
 
-# ==================== 图谱构建 ====================
-
 def _find_latest_batch(processed_dir: Path) -> Path:
-    """找到最新的批次目录"""
+    """获取最新批次目录"""
     batch_dirs = [
         d for d in processed_dir.iterdir()
         if d.is_dir() and d.name[0].isdigit()
@@ -182,7 +179,7 @@ def _find_latest_batch(processed_dir: Path) -> Path:
 
 
 def _resolve_processed_dir() -> Path:
-    """解析 processed 目录的绝对路径"""
+    """获取 processed 目录路径"""
     from .core.config import MODULE_DIR
     proc_config = load_processor_config()
     paths = proc_config.get("paths", {})
@@ -198,18 +195,17 @@ def _resolve_processed_dir() -> Path:
 
 def _run_graph_build(batch_name: str = None):
     """
-    执行 LightRAG 图谱构建
+    构建 LightRAG 图谱（内部调用，由 run_sync 触发）
 
     Args:
-        batch_name: 批次目录名（None = 最新批次）
+        batch_name: 批次名（None为最新）
     """
     from .processor.graph_builder import LightRAGGraphBuilder, load_lightrag_config
 
     lightrag_cfg = load_lightrag_config()
 
-    # 检查是否启用了图谱功能
     if not lightrag_cfg.get("pg_export", {}).get("enabled", True):
-        log.info("LightRAG 图谱构建未启用（pg_export.enabled=false），跳过")
+        log.info("图谱未启用，跳过")
         return None
 
     processed_dir = _resolve_processed_dir()
@@ -218,30 +214,27 @@ def _run_graph_build(batch_name: str = None):
         log.error(f"预处理目录不存在: {processed_dir}")
         return None
 
-    # 确定批次目录
+    # 批次目录
     if batch_name:
         batch_dir = processed_dir / batch_name
         if not batch_dir.exists():
-            log.error(f"指定的批次目录不存在: {batch_dir}")
+            log.error(f"批次目录不存在: {batch_dir}")
             return None
     else:
         batch_dir = _find_latest_batch(processed_dir)
         if batch_dir is None:
-            log.error(f"未找到任何批次目录: {processed_dir}")
+            log.error(f"未找到批次目录: {processed_dir}")
             return None
 
     log.info("=" * 50)
     log.info(f"LightRAG 图谱构建: {batch_dir.name}")
     log.info("=" * 50)
 
-    # 初始化构建器
     builder = LightRAGGraphBuilder()
     builder.initialize()
 
-    # 构建图谱
     report = builder.build_from_processed_dir(batch_dir)
 
-    # 保存报告
     report_file = batch_dir / "lightrag_report.json"
     with open(report_file, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
@@ -250,135 +243,51 @@ def _run_graph_build(batch_name: str = None):
     return report
 
 
-def _run_graph_query(question: str, mode: str = "hybrid"):
-    """查询知识图谱"""
-    from .processor.graph_builder import LightRAGGraphBuilder
-
-    builder = LightRAGGraphBuilder()
-    builder.initialize()
-
-    log.info(f"查询模式: {mode}")
-    log.info(f"问题: {question}")
-
-    answer = builder.query(question, mode=mode)
-    print(f"\n💡 回答:\n{answer}")
-
-
-def _run_graph_export(output_path: str):
-    """导出图谱数据"""
-    from .processor.graph_builder import LightRAGGraphBuilder
-
-    builder = LightRAGGraphBuilder()
-    builder.initialize()
-
-    ext = Path(output_path).suffix.lower()
-    fmt_map = {".csv": "csv", ".xlsx": "excel", ".md": "md", ".txt": "txt"}
-    fmt = fmt_map.get(ext, "csv")
-
-    builder.export_graph_visualization(output_path, format=fmt)
-    log.info(f"图谱数据已导出: {output_path}")
-
-
-# ==================== CLI 入口 ====================
-
 def main():
     parser = argparse.ArgumentParser(
-        description="飞书文档自动处理管线",
+        description="飞书文档自动处理管线（定时批处理）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+流程：拉取飞书文档 → 拆分/向量化/存库 → 重建图谱 → 导出到 PostgreSQL
+
 示例:
-  python -m auto-doc-process                           # 完整流程
-  python -m auto-doc-process sync                      # 同步 + 预处理 + 图谱
-  python -m auto-doc-process sync --no-graph           # 同步 + 预处理，跳过图谱
-  python -m auto-doc-process sync --dry-run            # 预览模式
-  python -m auto-doc-process graph                     # 构建最新批次图谱
-  python -m auto-doc-process graph --batch 20260306    # 构建指定批次图谱
-  python -m auto-doc-process query "GVG怎么玩？"        # 查询图谱
-  python -m auto-doc-process export graph.csv          # 导出图谱
+  python -m auto-doc-process                  # 全流程
+  python -m auto-doc-process --dry-run        # 预览（只列文档不下载）
+  python -m auto-doc-process --full           # 全量同步
+  python -m auto-doc-process --no-graph       # 跳过图谱构建
         """,
     )
 
-    subparsers = parser.add_subparsers(dest="command", help="子命令")
-
-    # ---- sync 子命令 ----
-    sync_parser = subparsers.add_parser("sync", help="同步飞书文档 + 预处理 + 图谱构建")
-    sync_parser.add_argument("--config", type=str, default=None,
-                             help="配置文件路径")
-    sync_parser.add_argument("--space-id", type=str, default=None,
-                             help="只同步指定知识空间 ID")
-    sync_parser.add_argument("--full", action="store_true",
-                             help="全量同步（忽略增量清单）")
-    sync_parser.add_argument("--dry-run", action="store_true",
-                             help="预览模式，只列出不下载")
-    sync_parser.add_argument("--no-graph", action="store_true",
-                             help="跳过 LightRAG 图谱构建")
-    sync_parser.add_argument("--log-level", type=str, default=None,
-                             choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-                             help="覆盖日志级别")
-
-    # ---- graph 子命令 ----
-    graph_parser = subparsers.add_parser("graph", help="构建知识图谱（从已有预处理数据）")
-    graph_parser.add_argument("--batch", type=str, default=None,
-                              help="指定批次目录名（默认处理最新批次）")
-
-    # ---- query 子命令 ----
-    query_parser = subparsers.add_parser("query", help="查询知识图谱")
-    query_parser.add_argument("question", type=str, help="查询问题")
-    query_parser.add_argument("--mode", type=str, default="hybrid",
-                              choices=["naive", "local", "global", "hybrid"],
-                              help="查询模式（默认 hybrid）")
-
-    # ---- export 子命令 ----
-    export_parser = subparsers.add_parser("export", help="导出图谱数据")
-    export_parser.add_argument("output", type=str,
-                               help="输出文件路径（支持 .csv/.xlsx/.md/.txt）")
-
-    # ---- 全局参数（兼容旧用法） ----
-    parser.add_argument("--config", type=str, default=None,
-                        help="配置文件路径")
-    parser.add_argument("--space-id", type=str, default=None,
-                        help="只同步指定知识空间 ID")
     parser.add_argument("--full", action="store_true",
-                        help="全量同步（忽略增量清单）")
+                        help="全量同步（忽略增量清单，重新下载所有文档）")
     parser.add_argument("--dry-run", action="store_true",
-                        help="预览模式，只列出不下载")
+                        help="预览模式（只列出文档列表，不下载不处理）")
+    parser.add_argument("--no-graph", action="store_true",
+                        help="跳过图谱构建步骤")
     parser.add_argument("--log-level", type=str, default=None,
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-                        help="覆盖日志级别")
+                        help="指定日志级别（默认从配置文件读取）")
 
     args = parser.parse_args()
 
-    # 根据子命令分发
-    if args.command == "graph":
-        _run_graph_build(args.batch)
+    config = load_full_config()
+    log_level = args.log_level or config["log_level"]
+    setup_logging(log_level, config["log_dir"])
 
-    elif args.command == "query":
-        _run_graph_query(args.question, mode=args.mode)
+    if not config.get("app_id") or not config.get("app_secret"):
+        log.error("缺少飞书凭证 (app_id / app_secret)")
+        sys.exit(1)
 
-    elif args.command == "export":
-        _run_graph_export(args.output)
-
-    elif args.command == "sync" or args.command is None:
-        # sync 或无子命令（兼容旧用法）→ 完整流程
-        config_path = getattr(args, "config", None)
-        config = load_full_config(config_path)
-
-        log_level = getattr(args, "log_level", None) or config["log_level"]
-        setup_logging(log_level, config["log_dir"])
-
-        if not config.get("app_id") or not config.get("app_secret"):
-            log.error("缺少飞书凭证 (app_id / app_secret)，请检查配置文件")
-            sys.exit(1)
-
-        build_graph = not getattr(args, "no_graph", False)
-
-        run_sync(
-            config,
-            space_id=getattr(args, "space_id", None),
-            full=getattr(args, "full", False),
-            dry_run=getattr(args, "dry_run", False),
-            build_graph=build_graph,
-        )
+    run_sync(
+        config,
+        full=args.full,
+        dry_run=args.dry_run,
+        build_graph=not args.no_graph,
+    )
 
 
-main()
+try:
+    main()
+except ConfigError as e:
+    log.error(str(e))
+    sys.exit(1)
