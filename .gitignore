@@ -24,6 +24,7 @@ models/
 # =============================================
 configs/feishu.yaml
 configs/db_info.yml
+configs/doc_splitter.yaml
 
 # =============================================
 # 日志 & 运行时文件
