@@ -193,12 +193,9 @@ def batch_export(client, config: dict, entries: list, output_dir: Path,
 
         log.info(f"{prefix} 导出: {name or token[:16]} ({doc_type} → .{ext})")
 
-        # 输出路径
+        # 输出路径（同名直接覆盖，保持文件名干净）
         file_prefix = safe_filename(name, token)
         out_path = str(output_dir / f"{file_prefix}.{ext}")
-        if os.path.exists(out_path):
-            base, ext_part = os.path.splitext(out_path)
-            out_path = f"{base}_{token[:8]}{ext_part}"
 
         try:
             actual_token, actual_type = token, doc_type
