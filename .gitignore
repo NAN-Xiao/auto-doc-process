@@ -27,12 +27,9 @@ configs/db_info.yml
 configs/doc_splitter.yaml
 
 # =============================================
-# 日志 & 运行时文件
+# 运行时数据（日志、清单、锁文件统一在此）
 # =============================================
-logs/
-*.log
-.feishu_export_manifest.json
-.feishu_export.lock
+_runtime/
 
 # =============================================
 # IDE / 编辑器

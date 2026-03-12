@@ -75,6 +75,43 @@ def safe_filename(name: str, fallback: str) -> str:
     return s or fallback
 
 
+def extract_docx_title(file_path: str) -> str:
+    """
+    从 docx 文件中提取真实文档标题
+
+    优先级：
+      1. 第一个 Heading 样式段落的文本
+      2. 第一个非空段落的文本（兜底）
+
+    Args:
+        file_path: docx 文件路径
+
+    Returns:
+        提取到的标题（去除首尾空白），提取失败返回空字符串
+    """
+    try:
+        from docx import Document as DocxDocument
+        doc = DocxDocument(file_path)
+
+        first_text = ""
+        for para in doc.paragraphs:
+            text = para.text.strip()
+            if not text:
+                continue
+            # 记住第一个非空段落作为兜底
+            if not first_text:
+                first_text = text
+            # 优先返回 Heading 样式
+            style_name = (para.style.name or "").lower()
+            if style_name.startswith("heading") or style_name.startswith("title"):
+                return text
+
+        return first_text
+    except Exception as e:
+        log.debug(f"提取 docx 标题失败 ({file_path}): {e}")
+        return ""
+
+
 # ==================== 进程锁（OS 级文件锁） ====================
 
 # 全局持有锁文件句柄，防止被 GC 关闭

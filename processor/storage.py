@@ -34,7 +34,20 @@ from ..core.logger import Logger
 
 
 class PgVectorStorage:
-    """PostgreSQL + pgvector 持久化管理器"""
+    """PostgreSQL + pgvector 持久化管理器
+
+    事务安全说明：
+      - 所有写操作在单个事务中完成（DELETE 旧版 + INSERT 新版）
+      - 写事务开头使用 pg_advisory_xact_lock 获取排他写锁，
+        保证同一时刻只有一个进程在修改 doc_chunks 表
+      - PostgreSQL MVCC 机制天然保证：读不阻塞写、写不阻塞读
+        → 另一个 RAG 系统在读取时不会被阻塞，也不会读到半写数据
+      - advisory lock 随事务自动释放，无需手动清理
+    """
+
+    # doc_chunks 表的写锁 ID（pg_advisory_xact_lock 使用的 bigint 常量）
+    # 选一个不易与其他业务冲突的数字即可
+    ADVISORY_LOCK_DOC_CHUNKS = 728301
 
     DDL_INIT = """
     CREATE EXTENSION IF NOT EXISTS vector;
@@ -225,6 +238,20 @@ class PgVectorStorage:
             Logger.warning(f"加载失败 chunk_{chunk_index:04d}: {e}", indent=1)
             return None
 
+    # -------------------- 查询 --------------------
+
+    def get_stored_doc_names(self) -> set:
+        """查询数据库中已有哪些 doc_name（去重），用于判断哪些文档需要处理"""
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT DISTINCT doc_name FROM doc_chunks")
+                return {row[0] for row in cur.fetchall()}
+        except Exception:
+            return set()
+        finally:
+            conn.close()
+
     # -------------------- 写入 --------------------
 
     def _delete_doc(self, cur, doc_name: str, timestamp: str = None):
@@ -241,7 +268,7 @@ class PgVectorStorage:
 
     def store_document(self, dir_info: Dict[str, Any]) -> int:
         """
-        将一个文档的所有 chunks 写入 PostgreSQL
+        将一个文档的所有 chunks 写入 PostgreSQL（单文档事务）
 
         Returns:
             写入的 chunk 数量
@@ -271,35 +298,15 @@ class PgVectorStorage:
         try:
             with conn.transaction():
                 with conn.cursor() as cur:
-                    # 先删旧数据
+                    cur.execute(
+                        "SELECT pg_advisory_xact_lock(%s)",
+                        (self.ADVISORY_LOCK_DOC_CHUNKS,),
+                    )
                     self._delete_doc(cur, dir_info["doc_name"], dir_info["timestamp"])
-
-                    for c in chunks:
-                        cur.execute(
-                            """
-                            INSERT INTO doc_chunks
-                                (doc_name, doc_format, doc_timestamp, chunk_id, chunk_index,
-                                 chunk_text, char_count, page_number, has_images, image_count,
-                                 images_json, source_file, space_id, source_url,
-                                 embedding, processed_at,
-                                 created_at, updated_at)
-                            VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s)
-                            """,
-                            (
-                                c["doc_name"], c["doc_format"], c["doc_timestamp"],
-                                c["chunk_id"], c["chunk_index"],
-                                c["chunk_text"], c["char_count"], c["page_number"],
-                                c["has_images"], c["image_count"],
-                                c["images_json"], c["source_file"],
-                                c["space_id"], c["source_url"],
-                                c["embedding"], c["processed_at"],
-                                now, now,
-                            ),
-                        )
+                    self._insert_chunks(cur, chunks, now)
 
             Logger.success(f"成功存储 {len(chunks)} chunks", indent=1)
 
-            # 统计图片
             with_images = sum(1 for c in chunks if c["has_images"])
             if with_images:
                 Logger.info(f"包含图片的 chunks: {with_images}", indent=1)
@@ -307,3 +314,102 @@ class PgVectorStorage:
             return len(chunks)
         finally:
             conn.close()
+
+    def batch_store_documents(self, dir_infos: List[Dict[str, Any]]) -> int:
+        """
+        批量统一入库：所有文档在同一个事务中写入 PostgreSQL
+
+        流程：
+          1. 获取 advisory lock（排他写锁）
+          2. 逐个文档: DELETE 旧版 → INSERT 新版
+          3. 事务提交（全部成功才写入，任何失败全部回滚）
+
+        这保证了：
+          - RAG 系统要么看到旧的完整数据，要么看到新的完整数据
+          - 不会出现部分文档更新、部分还是旧版的中间状态
+
+        Args:
+            dir_infos: store_document 格式的 dir_info 列表
+
+        Returns:
+            成功入库的文档数
+        """
+        if not dir_infos:
+            return 0
+
+        Logger.info(f"批量入库: {len(dir_infos)} 个文档")
+
+        # 预加载所有文档的 chunks（在事务外完成，减少锁持有时间）
+        all_doc_chunks: List[tuple] = []  # [(dir_info, chunks), ...]
+        for di in dir_infos:
+            emb_files = sorted(di["embeddings_dir"].glob("chunk_*.json"))
+            chunks = []
+            for ef in emb_files:
+                idx = int(ef.stem.split("_")[1])
+                data = self._load_chunk_data(idx, di)
+                if data:
+                    chunks.append(data)
+            if chunks:
+                all_doc_chunks.append((di, chunks))
+                Logger.info(f"  {di['doc_name']}: {len(chunks)} chunks", indent=1)
+            else:
+                Logger.warning(f"  {di['doc_name']}: 无有效 chunks，跳过", indent=1)
+
+        if not all_doc_chunks:
+            Logger.warning("没有任何有效 chunks 需要入库")
+            return 0
+
+        total_chunks = sum(len(chunks) for _, chunks in all_doc_chunks)
+        Logger.info(f"共计 {total_chunks} 个 chunks，开始写入...")
+
+        now = datetime.now()
+        conn = self._get_conn()
+        try:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    # 获取 advisory lock（事务级排他锁）
+                    cur.execute(
+                        "SELECT pg_advisory_xact_lock(%s)",
+                        (self.ADVISORY_LOCK_DOC_CHUNKS,),
+                    )
+
+                    for di, chunks in all_doc_chunks:
+                        self._delete_doc(cur, di["doc_name"], di["timestamp"])
+                        self._insert_chunks(cur, chunks, now)
+                        Logger.info(f"  ✓ {di['doc_name']}: {len(chunks)} chunks", indent=1)
+
+            Logger.success(f"批量入库成功: {len(all_doc_chunks)} 个文档, {total_chunks} 个 chunks")
+            return len(all_doc_chunks)
+
+        except Exception as e:
+            Logger.error(f"批量入库失败（已全部回滚）: {e}")
+            raise
+        finally:
+            conn.close()
+
+    # -------------------- 内部：批量插入 --------------------
+
+    def _insert_chunks(self, cur, chunks: List[Dict[str, Any]], now: datetime):
+        """将一组 chunks 插入数据库（在已有事务和游标中执行）"""
+        for c in chunks:
+            cur.execute(
+                """
+                INSERT INTO doc_chunks
+                    (doc_name, doc_format, doc_timestamp, chunk_id, chunk_index,
+                     chunk_text, char_count, page_number, has_images, image_count,
+                     images_json, source_file, space_id, source_url,
+                     embedding, processed_at,
+                     created_at, updated_at)
+                VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s)
+                """,
+                (
+                    c["doc_name"], c["doc_format"], c["doc_timestamp"],
+                    c["chunk_id"], c["chunk_index"],
+                    c["chunk_text"], c["char_count"], c["page_number"],
+                    c["has_images"], c["image_count"],
+                    c["images_json"], c["source_file"],
+                    c["space_id"], c["source_url"],
+                    c["embedding"], c["processed_at"],
+                    now, now,
+                ),
+            )

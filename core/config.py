@@ -25,16 +25,26 @@ class ConfigError(Exception):
 
 # ==================== 路径常量 ====================
 
-# core/ 的父目录 → auto-doc/
-MODULE_DIR = Path(__file__).parent.parent.resolve()
+# core/ 的父目录 → auto-doc-process/
+# 兼容两种情况：
+#   源码: core/config.py          → parent = core/ → parent.parent = auto-doc-process/
+#   编译: core/__pycache__/x.pyc  → parent = __pycache__/ → 需要多退一层
+_this_dir = Path(__file__).parent
+if _this_dir.name == "__pycache__":
+    _this_dir = _this_dir.parent          # __pycache__ → core/
+MODULE_DIR = _this_dir.parent.resolve()   # core/ → auto-doc-process/
 PROJECT_ROOT = MODULE_DIR.parent
 CONFIGS_DIR = MODULE_DIR / "configs"
 
+# 运行时数据目录（放在项目父目录，与文档同级，避免混入项目源码）
+RUNTIME_DIR = PROJECT_ROOT / "_runtime"
+RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+
 # 默认路径（可被配置覆盖）
-DEFAULT_LOG_DIR = PROJECT_ROOT / "logs"
+DEFAULT_LOG_DIR = RUNTIME_DIR / "logs"
 DEFAULT_EXPORT_DIR = PROJECT_ROOT / "feishu_exports"
-DEFAULT_MANIFEST_PATH = PROJECT_ROOT / ".feishu_export_manifest.json"
-DEFAULT_LOCK_PATH = PROJECT_ROOT / ".feishu_export.lock"
+DEFAULT_MANIFEST_PATH = RUNTIME_DIR / "manifest.json"
+DEFAULT_LOCK_PATH = RUNTIME_DIR / ".lock"
 
 
 # ==================== 日志 ====================

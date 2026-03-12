@@ -23,7 +23,7 @@ from . import api
 from . import manifest
 from ..core.utils import (
     EXPORTABLE_TYPES, SKIP_TYPES,
-    safe_filename, parse_feishu_url,
+    safe_filename, extract_docx_title, parse_feishu_url,
     acquire_lock, release_lock,
 )
 
@@ -78,11 +78,24 @@ def discover_documents(config: dict, space_id: str = None) -> list:
     for node in all_nodes:
         obj_type = node["obj_type"]
         if obj_type in exportable_types:
+            title = node["title"]
+
+            # 飞书 wiki 节点偶尔返回空标题，用 get_node API 补查
+            if not title:
+                try:
+                    _, _, resolved_title = api.resolve_wiki_token(
+                        config, node["node_token"])
+                    if resolved_title:
+                        title = resolved_title
+                        log.info(f"  补查标题: {node['obj_token'][:16]}... → [{title}]")
+                except Exception:
+                    pass
+
             entries.append({
                 "token": node["obj_token"],
                 "doc_type": obj_type,
                 "ext": exportable_types[obj_type],
-                "name": node["title"],
+                "name": title,
                 "url": f"wiki_node:{node['node_token']}",
                 "space_id": node["space_id"],
                 "obj_edit_time": node.get("obj_edit_time", ""),
@@ -188,21 +201,29 @@ def batch_export(client, config: dict, entries: list, output_dir: Path,
         # 增量检查
         if incremental and not manifest.is_changed(man, token, edit_time):
             log.info(f"{prefix} 跳过(未修改): {name or token[:16]}")
-            skip_list.append(entry)
+            # 把 manifest 中记录的文件路径带上，以便后续流程判断是否需要入库
+            man_record = man.get(token, {})
+            skip_list.append({
+                "entry": entry,
+                "path": man_record.get("file_path", ""),
+            })
             continue
 
         log.info(f"{prefix} 导出: {name or token[:16]} ({doc_type} → .{ext})")
 
-        # 输出路径（同名直接覆盖，保持文件名干净）
-        file_prefix = safe_filename(name, token)
-        out_path = str(output_dir / f"{file_prefix}.{ext}")
-
         try:
             actual_token, actual_type = token, doc_type
             if doc_type == "wiki":
-                actual_token, actual_type = api.resolve_wiki_token(config, token)
+                actual_token, actual_type, resolved_title = api.resolve_wiki_token(config, token)
                 if not actual_token:
                     raise RuntimeError("Wiki token 解析失败")
+                # 用解析出的标题补充空名称
+                if resolved_title and not name:
+                    name = resolved_title
+
+            # 输出路径（在 wiki 解析之后确定，确保用到解析后的名称）
+            file_prefix = safe_filename(name, token)
+            out_path = str(output_dir / f"{file_prefix}.{ext}")
 
             ticket = api.create_export_task(client, actual_token, actual_type, ext)
             if not ticket:
@@ -221,8 +242,24 @@ def batch_export(client, config: dict, entries: list, output_dir: Path,
             if not ok:
                 raise RuntimeError("下载文件失败")
 
+            # ---- 尝试从 docx 内容读取真实标题并重命名 ----
+            actual_name = name
+            if ext == "docx":
+                real_title = extract_docx_title(out_path)
+                if real_title and real_title != name:
+                    new_prefix = safe_filename(real_title, token)
+                    new_path = str(output_dir / f"{new_prefix}.{ext}")
+                    # 避免覆盖已有的其他文件
+                    if new_path != out_path:
+                        if os.path.exists(new_path):
+                            os.remove(new_path)
+                        os.rename(out_path, new_path)
+                        log.info(f"  文件名修正: {Path(out_path).name} → {Path(new_path).name}")
+                        out_path = new_path
+                        actual_name = real_title
+
             success_list.append({"entry": entry, "path": out_path})
-            manifest.record_download(man, token, out_path, edit_time, name,
+            manifest.record_download(man, token, out_path, edit_time, actual_name,
                                      manifest_path=manifest_path)
 
         except Exception as e:

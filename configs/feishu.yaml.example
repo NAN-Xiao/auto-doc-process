@@ -26,7 +26,7 @@ feishu:
   # -------------------- 日志配置 --------------------
   log:
     level: "INFO"             # 日志级别: DEBUG / INFO / WARNING / ERROR
-    dir: ""                   # 日志目录（留空 = <项目根>/logs）
+    dir: ""                   # 日志目录（留空 = <父目录>/_runtime/logs）
 
   # -------------------- 导出参数 --------------------
   export:
@@ -63,11 +63,18 @@ feishu:
 
   # -------------------- 增量清单 --------------------
   manifest:
-    # 增量下载清单文件路径（留空 = <项目根>/.feishu_export_manifest.json）
+    # 增量下载清单文件路径（留空 = <父目录>/_runtime/manifest.json）
     path: ""
+
+  # -------------------- 定时调度 --------------------
+  # Windows 任务计划程序：deploy.bat install 注册为每天凌晨执行
+  # 内置调度器：python run.py --schedule 启动守护进程（备用方案）
+  schedule:
+    run_time: "02:00"         # 每天执行时间（deploy.bat 中的 RUN_TIME 与此一致）
+    run_on_start: true        # 内置调度器：启动时是否立即执行一次
 
   # -------------------- 进程锁 --------------------
   lock:
-    # 进程锁文件路径（留空 = <项目根>/.feishu_export.lock）
+    # 进程锁文件路径（留空 = <父目录>/_runtime/.lock）
     path: ""
 

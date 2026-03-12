@@ -68,24 +68,25 @@ class BatchWorkflow:
         return documents
     
     def process_single_document(self, doc_path: Path, batch_timestamp: str = None,
-                                doc_meta: Dict[str, Any] = None) -> Optional[Dict[str, Any]]:
+                                doc_meta: Dict[str, Any] = None,
+                                store_to_db: bool = True) -> Optional[Dict[str, Any]]:
         """
-        处理单个文档
-        
+        处理单个文档（拆分 + 向量化，可选入库）
+
         Args:
             doc_path: 文档路径
             batch_timestamp: 批次时间戳（同一批次共用；None 则自动生成）
             doc_meta: 文档来源元数据（如 space_id, source_url），用于写入 pgvector
+            store_to_db: 是否立即入库（False = 只处理不入库，后续调用 batch_store）
         """
         Logger.separator()
         Logger.info(f"处理文档: {doc_path.name}")
         Logger.separator()
-        
+
         start_time = datetime.now()
-        # 如果没有传入批次时间戳，自动生成
         if batch_timestamp is None:
             batch_timestamp = start_time.strftime("%Y%m%d_%H%M%S")
-        
+
         result = {
             'document': doc_path.name,
             'doc_path': str(doc_path),
@@ -96,19 +97,19 @@ class BatchWorkflow:
             'success': False,
             'error': None
         }
-        
+
         try:
             Logger.info("步骤1：拆分文档...")
-            
+
             output_path = generate_output_path(doc_path, batch_timestamp=batch_timestamp)
-            
+
             doc_info = process_document(
                 input_path=doc_path,
                 output_dir=output_path,
                 use_llm_naming=self.use_llm_naming,
                 config=self.config,
             )
-            
+
             if doc_info:
                 result['step1_split'] = {
                     'success': True,
@@ -126,20 +127,27 @@ class BatchWorkflow:
                 result['error'] = '步骤1：文档拆分失败'
                 Logger.error("文档拆分失败")
                 return result
-            
+
+            # 空文档（0 chunks）→ 跳过后续步骤，不视为错误
+            if doc_info.total_chunks == 0:
+                Logger.warning(f"文档内容为空（0 chunks），跳过: {doc_path.name}")
+                result['step2_embeddings'] = {'success': True, 'chunk_count': 0}
+                result['success'] = True
+                result['skipped'] = True
+                result['completed_at'] = datetime.now().isoformat()
+                return result
+
             Logger.info("步骤2：生成 Embeddings...")
-            
-            # 读取 chunks 数据
+
             chunks = self._load_chunks(output_path)
             if not chunks:
                 result['step2_embeddings'] = {'success': False, 'error': '无法加载 chunks'}
                 result['error'] = '步骤2：无法加载 chunks'
                 Logger.error("无法加载 chunks 数据")
                 return result
-            
-            # 读取 images 数据
+
             images = self._load_images(output_path)
-            
+
             doc_data = {
                 'path': output_path,
                 'doc_name': doc_path.stem,
@@ -152,9 +160,9 @@ class BatchWorkflow:
                 'chunks': chunks,
                 'images': images
             }
-            
+
             chunk_count = self.embedding_generator.build_embeddings_for_document(doc_data)
-            
+
             if chunk_count > 0:
                 result['step2_embeddings'] = {
                     'success': True,
@@ -169,23 +177,25 @@ class BatchWorkflow:
                 result['error'] = '步骤2：Embeddings 生成失败'
                 Logger.error("Embeddings 生成失败")
                 return result
-            
+
+            # 保存 dir_info 供后续 batch_store 使用
+            _meta = doc_meta or {}
+            result['_dir_info'] = {
+                'doc_name': doc_data['doc_name'],
+                'timestamp': doc_data['timestamp'],
+                'embeddings_dir': output_path / 'embeddings',
+                'metadata_dir': output_path / 'metadata',
+                'chunks_dir': output_path / 'chunks',
+                'space_id': _meta.get('space_id', ''),
+                'source_url': _meta.get('source_url', ''),
+            }
+
             # ---- 步骤3：存入 PostgreSQL (pgvector) ----
-            if self.vector_storage:
+            if store_to_db and self.vector_storage:
                 Logger.info("步骤3：存入 PostgreSQL...")
                 try:
                     self.vector_storage.init_table()
-                    _meta = doc_meta or {}
-                    dir_info = {
-                        'doc_name': doc_data['doc_name'],
-                        'timestamp': doc_data['timestamp'],
-                        'embeddings_dir': output_path / 'embeddings',
-                        'metadata_dir': output_path / 'metadata',
-                        'chunks_dir': output_path / 'chunks',
-                        'space_id': _meta.get('space_id', ''),
-                        'source_url': _meta.get('source_url', ''),
-                    }
-                    stored = self.vector_storage.store_document(dir_info)
+                    stored = self.vector_storage.store_document(result['_dir_info'])
                     result['step3_store'] = {
                         'success': stored > 0,
                         'stored_count': stored,
@@ -197,27 +207,66 @@ class BatchWorkflow:
                 except Exception as e:
                     result['step3_store'] = {'success': False, 'error': str(e)}
                     Logger.error(f"数据库入库失败: {e}")
+            elif not store_to_db:
+                Logger.info("步骤3：延迟入库（等待批量统一入库）")
             else:
                 Logger.info("步骤3：跳过（未配置数据库）")
-            
+
             result['success'] = True
             end_time = datetime.now()
             result['completed_at'] = end_time.isoformat()
             result['duration_seconds'] = (end_time - start_time).total_seconds()
-            
+
             Logger.separator()
             Logger.success(f"文档处理完成: {doc_path.name}")
             Logger.info(f"总耗时: {result['duration_seconds']:.2f} 秒", indent=1)
             Logger.separator()
-            
+
             return result
-            
+
         except Exception as e:
             result['error'] = str(e)
             Logger.error(f"处理失败: {e}")
             import traceback
             traceback.print_exc()
             return result
+
+    def batch_store(self, results: List[Dict[str, Any]]) -> int:
+        """
+        批量统一入库：将所有已处理文档在一个事务中写入 PostgreSQL
+
+        Args:
+            results: process_single_document 返回的结果列表（需包含 _dir_info）
+
+        Returns:
+            成功入库的文档数
+        """
+        if not self.vector_storage:
+            Logger.warning("未配置数据库，跳过批量入库")
+            return 0
+
+        # 收集所有需要入库的 dir_info（排除空文档）
+        dir_infos = []
+        for r in results:
+            if r and r.get('success') and r.get('_dir_info') and not r.get('skipped'):
+                dir_infos.append(r['_dir_info'])
+
+        if not dir_infos:
+            Logger.warning("没有需要入库的文档")
+            return 0
+
+        Logger.separator()
+        Logger.info(f"批量统一入库: {len(dir_infos)} 个文档")
+        Logger.separator()
+
+        self.vector_storage.init_table()
+        stored_count = self.vector_storage.batch_store_documents(dir_infos)
+
+        Logger.separator()
+        Logger.success(f"批量入库完成: {stored_count} 个文档")
+        Logger.separator()
+
+        return stored_count
     
     def _load_images(self, doc_dir: Path) -> Dict[str, Dict[str, Any]]:
         """

@@ -262,6 +262,9 @@ class PgGraphExporter:
     CREATE INDEX IF NOT EXISTS idx_{table}_chunk ON {table} (chunk_id);
     """
 
+    # lightrag 图谱表的写锁 ID（pg_advisory_xact_lock）
+    ADVISORY_LOCK_GRAPH = 728302
+
     def __init__(self, db_config: dict, export_config: dict):
         self.db_config = db_config
         self.entity_table = export_config.get("entity_table", "lightrag_entities")
@@ -359,6 +362,13 @@ class PgGraphExporter:
         try:
             with conn.transaction():
                 with conn.cursor() as cur:
+                    # 获取 advisory lock（事务级排他锁）
+                    # 保证同一时刻只有一个进程在写图谱表
+                    cur.execute(
+                        "SELECT pg_advisory_xact_lock(%s)",
+                        (self.ADVISORY_LOCK_GRAPH,),
+                    )
+
                     # ---------- 导出实体 ----------
                     for node in all_nodes:
                         # id 就是 entity_name（由 NetworkXStorage.get_all_nodes 添加）
@@ -444,6 +454,10 @@ class PgGraphExporter:
         try:
             with conn.transaction():
                 with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT pg_advisory_xact_lock(%s)",
+                        (self.ADVISORY_LOCK_GRAPH,),
+                    )
                     for chunk in chunks_data:
                         cur.execute(
                             f"""

@@ -102,18 +102,18 @@ def create_lark_client(config: dict):
 )
 def resolve_wiki_token(config: dict, wiki_token: str) -> tuple:
     """
-    解析 Wiki 文档的真实 token 和类型
+    解析 Wiki 文档的真实 token、类型和标题
 
     Args:
         config: 飞书凭证配置
-        wiki_token: Wiki 页面 token（/wiki/xxx 中的 xxx）
+        wiki_token: Wiki 页面 token（/wiki/xxx 中的 xxx，也接受 node_token 或 obj_token）
 
     Returns:
-        (obj_token, obj_type) 或 (None, None)
+        (obj_token, obj_type, title) 或 (None, None, "")
     """
     access_token = get_tenant_access_token(config)
     if not access_token:
-        return None, None
+        return None, None, ""
 
     base_url = config.get("base_url", "https://open.feishu.cn")
     resp = requests.get(
@@ -125,7 +125,7 @@ def resolve_wiki_token(config: dict, wiki_token: str) -> tuple:
 
     if data.get("code", -1) != 0:
         log.error(f"Wiki 解析失败: {data.get('msg', '')}")
-        return None, None
+        return None, None, ""
 
     node = data.get("data", {}).get("node", {})
     obj_token = node.get("obj_token", "")
@@ -133,7 +133,7 @@ def resolve_wiki_token(config: dict, wiki_token: str) -> tuple:
     title = node.get("title", "")
 
     log.info(f"Wiki 解析: {wiki_token} → {obj_token} ({obj_type}) [{title}]")
-    return obj_token, obj_type
+    return obj_token, obj_type, title
 
 
 # ==================== 知识空间发现 ====================

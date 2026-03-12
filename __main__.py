@@ -5,11 +5,17 @@
 
 定时批处理：拉取飞书文档 → 拆分/向量化/存库 → 重建图谱 → 导出到 PostgreSQL
 
-用法：
-  python -m auto-doc-process                  # 全流程
-  python -m auto-doc-process --dry-run        # 预览模式（只列文档不下载）
-  python -m auto-doc-process --full           # 全量同步（忽略增量清单）
-  python -m auto-doc-process --no-graph       # 跳过图谱构建
+用法（通过 run.py 启动，在 doctment 目录下执行）：
+  python auto-doc-process/run.py                  # 全流程（单次）
+  python auto-doc-process/run.py --dry-run        # 预览模式（只列文档不下载）
+  python auto-doc-process/run.py --full           # 全量同步（忽略增量清单）
+  python auto-doc-process/run.py --no-graph       # 跳过图谱构建
+  python auto-doc-process/run.py --schedule       # 守护进程模式（定时循环）
+
+部署（Windows 任务计划程序）：
+  deploy.bat install      # 注册定时任务
+  deploy.bat uninstall    # 卸载定时任务
+  start.bat               # 双击手动执行
 """
 
 import sys
@@ -99,11 +105,9 @@ def run_sync(config: dict, full: bool = False, dry_run: bool = False,
 
         batch_timestamp = None
 
-        if success and config.get("vec_enabled") and config.get("db"):
-            log.info("=" * 50)
-            log.info("文档处理管线")
-            log.info("=" * 50)
+        has_docs = success or skip  # 有新下载的或有历史已下载的
 
+        if has_docs and config.get("vec_enabled") and config.get("db"):
             from .processor.workflow import BatchWorkflow
 
             proc_config = load_processor_config()
@@ -114,41 +118,88 @@ def run_sync(config: dict, full: bool = False, dry_run: bool = False,
                 db_config=config["db"],
             )
 
-            batch_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            # ── 检查数据库中已有哪些文档 ──
+            workflow.vector_storage.init_table()
+            stored_names = workflow.vector_storage.get_stored_doc_names()
+            log.info(f"数据库中已有 {len(stored_names)} 个文档")
 
-            proc_success = 0
-            proc_fail = 0
-            for item in success:
-                file_path = item.get("path", "")
-                if not file_path or not Path(file_path).exists():
+            # ── 合并处理队列：新下载 + 已下载但未入库 ──
+            items_to_process = list(success)  # 新下载的一定要处理
+
+            for sk in skip:
+                sk_path = sk.get("path", "")
+                if not sk_path or not Path(sk_path).exists():
                     continue
+                # 根据文件名（无后缀）判断是否已在 DB 中
+                doc_stem = Path(sk_path).stem
+                if doc_stem not in stored_names:
+                    log.info(f"  补充处理(已下载但未入库): {Path(sk_path).name}")
+                    items_to_process.append(sk)
 
-                doc_path = Path(file_path)
-                # 仅处理 docx / pdf（项目不处理 Excel）
-                if doc_path.suffix.lower() not in (".docx", ".pdf"):
-                    log.info(f"  跳过: {doc_path.name}")
-                    continue
+            if not items_to_process:
+                log.info("所有文档均已入库，无需处理")
+            else:
+                batch_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-                # 构建来源元数据，传递到 pgvector 存储
-                entry = item.get("entry", {})
-                doc_meta = {
-                    "space_id": entry.get("space_id", ""),
-                    "source_url": entry.get("url", ""),
-                }
+                # ── 阶段 2：全部处理（拆分 + 向量化，不入库） ──
+                log.info("=" * 50)
+                log.info(f"阶段2: 文档处理（拆分 + 向量化）— 共 {len(items_to_process)} 个")
+                log.info("=" * 50)
 
-                result = workflow.process_single_document(
-                    doc_path, batch_timestamp=batch_timestamp,
-                    doc_meta=doc_meta,
-                )
+                proc_results = []
+                proc_success = 0
+                proc_skip = 0
+                proc_fail = 0
 
-                if result and result.get("success"):
-                    proc_success += 1
-                else:
-                    proc_fail += 1
+                for item in items_to_process:
+                    file_path = item.get("path", "")
+                    if not file_path or not Path(file_path).exists():
+                        continue
 
-            log.info(f"文档处理完成: 成功={proc_success} 失败={proc_fail}")
+                    doc_path = Path(file_path)
+                    if doc_path.suffix.lower() not in (".docx", ".pdf"):
+                        log.info(f"  跳过非文档文件: {doc_path.name}")
+                        continue
 
-        elif success and not config.get("db"):
+                    entry = item.get("entry", {})
+                    doc_meta = {
+                        "space_id": entry.get("space_id", ""),
+                        "source_url": entry.get("url", ""),
+                    }
+
+                    result = workflow.process_single_document(
+                        doc_path, batch_timestamp=batch_timestamp,
+                        doc_meta=doc_meta,
+                        store_to_db=False,  # 不立即入库
+                    )
+
+                    proc_results.append(result)
+                    if result and result.get("skipped"):
+                        proc_skip += 1
+                    elif result and result.get("success"):
+                        proc_success += 1
+                    else:
+                        proc_fail += 1
+
+                log.info(f"文档处理完成: 成功={proc_success} 跳过(空文档)={proc_skip} 失败={proc_fail}")
+
+                # ── 阶段 3：统一入库（一个事务写入所有文档） ──
+                if proc_success > 0:
+                    log.info("=" * 50)
+                    log.info("阶段3: 统一入库（单事务批量写入）")
+                    log.info("=" * 50)
+
+                    try:
+                        stored = workflow.batch_store(proc_results)
+                        log.info(f"入库完成: {stored} 个文档")
+                    except Exception as e:
+                        log.error(f"统一入库失败（已回滚）: {e}")
+
+                # 无成功文档 → 不触发图谱构建
+                if proc_success == 0:
+                    batch_timestamp = None
+
+        elif has_docs and not config.get("db"):
             log.info("未配置数据库，跳过文档处理")
 
         # 图谱构建
@@ -286,8 +337,10 @@ def main():
     )
 
 
-try:
-    main()
-except ConfigError as e:
-    log.error(str(e))
-    sys.exit(1)
+def _entry():
+    """包入口（由 run.py 显式调用，不在 import 时自动执行）"""
+    try:
+        main()
+    except ConfigError as e:
+        log.error(str(e))
+        sys.exit(1)
