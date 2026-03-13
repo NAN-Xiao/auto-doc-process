@@ -360,9 +360,13 @@ class PgGraphExporter:
                 embed_keys.append(name)
 
             try:
-                vectors = loop.run_until_complete(embedding_func.func(embed_texts))
-                for key, vec in zip(embed_keys, vectors):
-                    entity_embeddings[key] = vec.tolist() if hasattr(vec, 'tolist') else list(vec)
+                EMBED_BATCH = 32  # 分批防止 OOM
+                for i in range(0, len(embed_texts), EMBED_BATCH):
+                    batch_texts = embed_texts[i:i + EMBED_BATCH]
+                    batch_keys = embed_keys[i:i + EMBED_BATCH]
+                    vectors = loop.run_until_complete(embedding_func.func(batch_texts))
+                    for key, vec in zip(batch_keys, vectors):
+                        entity_embeddings[key] = vec.tolist() if hasattr(vec, 'tolist') else list(vec)
                 Logger.info(f"已生成 {len(entity_embeddings)} 个实体 embedding")
             except Exception as e:
                 Logger.warning(f"实体 embedding 生成失败，将跳过: {e}")

@@ -79,7 +79,7 @@ lightrag:
   # 数据库连接复用 db_info.yml
   # -----------------------------------------
   pg_export:
-    enabled: true                        # 是否启用导出到 PostgreSQL
+    enabled: false                       # 关闭 PG 导出（本地文件已足够，doc_chunks 单独入库）
     entity_table: "lightrag_entities"    # 实体表名
     relation_table: "lightrag_relations" # 关系表名
     chunk_table: "lightrag_chunks"       # 文本块表名

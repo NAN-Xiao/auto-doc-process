@@ -64,50 +64,50 @@ def step_download(config: dict, full: bool = False, dry_run: bool = False) -> di
     from .feishu.exporter import discover_documents, batch_export
     from .feishu.api import create_lark_client
 
-        feishu_config = {
-            "app_id": config["app_id"],
-            "app_secret": config["app_secret"],
-            "base_url": config["base_url"],
-            "type_format_map": config.get("type_format_map"),
-        }
+    feishu_config = {
+        "app_id": config["app_id"],
+        "app_secret": config["app_secret"],
+        "base_url": config["base_url"],
+        "type_format_map": config.get("type_format_map"),
+    }
 
-        # 获取文档列表
-        space_ids = config.get("space_ids", [])
-        if space_ids:
-            all_entries = []
-            for sid in space_ids:
-                entries = discover_documents(feishu_config, space_id=sid)
-                all_entries.extend(entries)
-        else:
-            all_entries = discover_documents(feishu_config)
+    # 获取文档列表
+    space_ids = config.get("space_ids", [])
+    if space_ids:
+        all_entries = []
+        for sid in space_ids:
+            entries = discover_documents(feishu_config, space_id=sid)
+            all_entries.extend(entries)
+    else:
+        all_entries = discover_documents(feishu_config)
 
-        if not all_entries:
-            log.info("未发现可导出文档")
+    if not all_entries:
+        log.info("未发现可导出文档")
         return {"success": [], "fail": [], "skip": [], "entries": []}
 
-        log.info(f"发现 {len(all_entries)} 个文档")
-        for i, e in enumerate(all_entries, 1):
-            name_part = f" [{e['name']}]" if e.get("name") else ""
-            log.info(f"  {i}. {e['doc_type']:6s} → .{e['ext']:4s}  "
-                     f"{e['token'][:16]}...{name_part}")
+    log.info(f"发现 {len(all_entries)} 个文档")
+    for i, e in enumerate(all_entries, 1):
+        name_part = f" [{e['name']}]" if e.get("name") else ""
+        log.info(f"  {i}. {e['doc_type']:6s} → .{e['ext']:4s}  "
+                 f"{e['token'][:16]}...{name_part}")
 
-        if dry_run:
-            log.info("预览模式，未下载")
+    if dry_run:
+        log.info("预览模式，未下载")
         return {"success": [], "fail": [], "skip": [], "entries": all_entries}
 
-        # 创建 Client
-        client = create_lark_client(feishu_config)
-        if not client:
-            log.error("创建 SDK Client 失败")
-            sys.exit(1)
+    # 创建 Client
+    client = create_lark_client(feishu_config)
+    if not client:
+        log.error("创建 SDK Client 失败")
+        sys.exit(1)
 
-        out_path = config.get("output_dir", Path("feishu_exports"))
+    out_path = config.get("output_dir", Path("feishu_exports"))
 
-        # 批量导出
-        success, fail, skip = batch_export(
-            client, config, all_entries, out_path,
-            incremental=not full,
-        )
+    # 批量导出
+    success, fail, skip = batch_export(
+        client, config, all_entries, out_path,
+        incremental=not full,
+    )
 
     log.info(f"下载完成: 成功={len(success)} 跳过={len(skip)} 失败={len(fail)}")
     return {"success": success, "fail": fail, "skip": skip, "entries": all_entries}
@@ -131,19 +131,19 @@ def step_process(config: dict, download_result: dict = None,
     Returns:
         {"results": [...], "success": N, "skip": N, "fail": N, "workflow": workflow}
     """
-            from .processor.workflow import BatchWorkflow
+    from .processor.workflow import BatchWorkflow
 
     if not config.get("vec_enabled") or not config.get("db"):
         log.warning("向量化未启用或未配置数据库，跳过处理")
         return {"results": [], "success": 0, "skip": 0, "fail": 0, "workflow": None}
 
-            proc_config = load_processor_config()
-            use_llm = proc_config.get('doc_splitter', {}).get('image_naming', {}).get('use_llm', False)
+    proc_config = load_processor_config()
+    use_llm = proc_config.get('doc_splitter', {}).get('image_naming', {}).get('use_llm', False)
 
-            workflow = BatchWorkflow(
-                use_llm_naming=use_llm,
-                db_config=config["db"],
-            )
+    workflow = BatchWorkflow(
+        use_llm_naming=use_llm,
+        db_config=config["db"],
+    )
 
     # ── 确定要处理的文档列表 ──
     workflow.vector_storage.init_table()
@@ -161,7 +161,7 @@ def step_process(config: dict, download_result: dict = None,
         return {"results": [], "success": 0, "skip": 0, "fail": 0, "workflow": workflow}
 
     # 时间戳仅用于 DB 元数据字段（doc_timestamp），不影响目录结构
-            batch_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    batch_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     log.info("=" * 50)
     log.info(f"文档处理（拆分 + 向量化）— 共 {len(items_to_process)} 个")
@@ -211,8 +211,8 @@ def _collect_items_to_process(config: dict, download_result: dict,
 
         for token, record in man.items():
             file_path = record.get("file_path", "")
-                if not file_path or not Path(file_path).exists():
-                    continue
+            if not file_path or not Path(file_path).exists():
+                continue
             doc_stem = Path(file_path).stem
             if doc_stem not in stored_names:
                 log.info(f"  待处理(未入库): {Path(file_path).name}")
@@ -420,7 +420,7 @@ def _worker_process_documents(input_file: str, output_file: str):
     for idx, item in enumerate(items, 1):
         file_path = item.get("path", "")
         doc_meta = item.get("doc_meta", {})
-                doc_path = Path(file_path)
+        doc_path = Path(file_path)
 
         log.info(f"[{idx}/{len(items)}] 处理: {doc_path.name}")
 
@@ -551,7 +551,7 @@ def _load_results_from_processed_dir(workflow, reset_db: bool = False) -> list:
 
         chunk_files = sorted(metadata_dir.glob("chunk_*.json"))
         if not chunk_files:
-                    continue
+            continue
 
         log.info(f"  加载: {doc_name} ({len(chunk_files)} chunks)")
 
@@ -746,7 +746,7 @@ def _preflight_check(config: dict, steps: list):
             log.error(f"  ✗ {f}")
         log.error("")
         log.error("环境预检失败，请修复上述问题后重试")
-            sys.exit(1)
+        sys.exit(1)
 
     if not issues_warn and not issues_fatal:
         log.info("  环境预检通过")
