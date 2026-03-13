@@ -91,6 +91,12 @@ def discover_documents(config: dict, space_id: str = None) -> list:
                 except Exception:
                     pass
 
+            # 补查后仍无标题，跳过该文档
+            if not title or not title.strip():
+                log.info(f"  跳过(无标题): {node['obj_token'][:16]}...")
+                skipped["untitled"] = skipped.get("untitled", 0) + 1
+                continue
+
             entries.append({
                 "token": node["obj_token"],
                 "doc_type": obj_type,
@@ -226,6 +232,12 @@ def batch_export(client, config: dict, entries: list, output_dir: Path,
                     raise RuntimeError("Wiki token 解析失败")
                 if resolved_title and not name:
                     name = resolved_title
+
+            # 解析后仍无标题，跳过
+            if not name or not name.strip():
+                log.info(f"{prefix} 跳过(无标题): {token[:16]}")
+                skip_list.append({"entry": entry, "path": ""})
+                continue
 
             file_prefix = safe_filename(name, token)
             out_path = str(output_dir / f"{file_prefix}.{ext}")

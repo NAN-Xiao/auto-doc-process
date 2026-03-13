@@ -44,7 +44,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from .core.config import load_full_config, load_processor_config, log, setup_logging, ConfigError
+from .core.config import load_full_config, load_processor_config, log, setup_logging, ConfigError, MODULE_DIR
 from .core.utils import acquire_lock, release_lock
 
 
@@ -262,7 +262,7 @@ def _run_process_with_isolation(items: list, batch_timestamp: str) -> list:
         所有文档的处理结果列表
     """
     MAX_CRASH_RESTARTS = 5
-    run_py = str(Path(__file__).parent / "run.py")
+    run_py = str(MODULE_DIR / "run.py")
     all_results = []
     remaining = list(items)
     crash_count = 0
@@ -296,7 +296,7 @@ def _run_process_with_isolation(items: list, batch_timestamp: str) -> list:
             log.info(f"启动子进程处理 {len(remaining)} 个文档...")
             ret = subprocess.run(
                 [sys.executable, run_py, "--_worker", input_file, output_file],
-                cwd=str(Path(__file__).parent.parent),
+                cwd=str(MODULE_DIR.parent),
             )
 
             # ── 读取已完成的结果 ──

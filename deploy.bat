@@ -6,30 +6,30 @@ setlocal enabledelayedexpansion
 :: 飞书文档自动处理 — Windows 任务计划程序 管理工具
 ::
 :: 用法（以管理员身份运行）：
-::   deploy.bat install     注册定时任务（每天凌晨 2:00 执行）
+::   deploy.bat install     注册定时任务
 ::   deploy.bat uninstall   删除定时任务
-::   deploy.bat stop        暂停定时 + 终止正在运行的任务（用于更新版本）
+::   deploy.bat stop        暂停定时 + 终止正在运行的任务
 ::   deploy.bat start       恢复定时
 ::   deploy.bat run         立即执行一次
 ::   deploy.bat status      查看任务状态
 :: ============================================================
 
-:: ─── 可修改参数 ────────────────────────────────────────────
+:: ─── 默认参数 ────────────────────────────────────────────
 set TASK_NAME=FeishuDocSync
 set RUN_TIME=02:00
-:: ─── 结束可修改参数 ────────────────────────────────────────
+:: ─── 结束默认参数 ────────────────────────────────────────
 
-:: 定位路径
-set SCRIPT_DIR=%~dp0
-if "%SCRIPT_DIR:~-1%"=="\" set SCRIPT_DIR=%SCRIPT_DIR:~0,-1%
+:: 切换到脚本所在目录，后续全部使用相对路径
+cd /d "%~dp0"
 
-set PARENT_DIR=%SCRIPT_DIR%\..
-pushd "%PARENT_DIR%"
-set WORK_DIR=%CD%
-popd
+:: 绝对路径（仅 schtasks /TR 需要，定时任务必须用绝对路径）
+set ABS_PYTHON=%CD%\venv\Scripts\python.exe
+set ABS_RUN_PY=%CD%\run.py
 
-set PYTHON_EXE=%SCRIPT_DIR%\venv\Scripts\python.exe
-set RUN_PY=%SCRIPT_DIR%\run.py
+:: 从 feishu.yaml 读取 run_time（覆盖默认值）
+if exist "configs\feishu.yaml" (
+    for /f "usebackq tokens=2" %%a in (`findstr /c:"run_time:" "configs\feishu.yaml"`) do set "RUN_TIME=%%~a"
+)
 
 :: 检查虚拟环境（install/run 时需要）
 if /i "%~1"=="install" goto :check_venv
@@ -37,9 +37,9 @@ if /i "%~1"=="run" goto :check_venv
 goto :skip_venv_check
 
 :check_venv
-if not exist "%PYTHON_EXE%" (
-    echo [错误] 未找到虚拟环境: %PYTHON_EXE%
-    echo        请先创建: cd "%SCRIPT_DIR%" ^&^& python -m venv venv ^&^& venv\Scripts\pip install -r requirements.txt
+if not exist "venv\Scripts\python.exe" (
+    echo [错误] 未找到虚拟环境: venv\Scripts\python.exe
+    echo        请先运行: python -m venv venv ^&^& venv\Scripts\pip install -r requirements.txt
     goto :end
 )
 :skip_venv_check
@@ -54,6 +54,70 @@ if /i "%~1"=="run" goto :run_now
 if /i "%~1"=="status" goto :status
 goto :usage
 
+:: ─── 环境预检 ─────────────────────────────────────────────
+:preflight
+echo.
+echo [预检] 检查配置文件和环境...
+set CHECK_FAIL=0
+
+:: 1) 配置文件
+for %%f in (feishu.yaml db_info.yml doc_splitter.yaml) do (
+    if not exist "configs\%%f" (
+        echo   [FAIL] 配置文件缺失: configs\%%f
+        echo          请从 configs\%%f.example 复制并填写
+        set CHECK_FAIL=1
+    ) else (
+        echo   [ OK ] configs\%%f
+    )
+)
+
+:: 2) lightrag.yaml (optional)
+if not exist "configs\lightrag.yaml" (
+    echo   [WARN] configs\lightrag.yaml 不存在（图谱构建将使用默认参数）
+) else (
+    echo   [ OK ] configs\lightrag.yaml
+)
+
+:: 3) ONNX model
+if exist "models\onnx\model.onnx" (
+    echo   [ OK ] models\onnx\model.onnx
+) else (
+    echo   [WARN] ONNX 模型不存在（models\onnx\model.onnx），将尝试 HuggingFace 回退
+)
+
+:: 4) DB connection + auto-create database/pgvector + Feishu API check
+if "!CHECK_FAIL!"=="0" (
+    echo.
+    echo [预检] 测试数据库连接和 API 配置...
+    "venv\Scripts\python.exe" "tools\preflight_check.py" "configs"
+    if errorlevel 3 (
+        echo.
+        echo          feishu.yaml 中 app_id / app_secret 未配置或仍是模板值
+        set CHECK_FAIL=1
+    ) else if errorlevel 2 (
+        echo.
+        echo          pgvector 扩展安装失败，请手动安装后重试
+        set CHECK_FAIL=1
+    ) else if errorlevel 1 (
+        echo.
+        echo          请检查:
+        echo            - PostgreSQL 服务是否启动
+        echo            - db_info.yml 中的连接信息是否正确
+        set CHECK_FAIL=1
+    )
+)
+
+echo.
+if "!CHECK_FAIL!"=="1" (
+    echo ====================================================
+    echo  [预检失败] 请修复以上错误后重新运行 deploy.bat
+    echo ====================================================
+    goto :end
+)
+echo [预检] 全部通过
+echo.
+goto :eof
+
 :: ─── 安装 ──────────────────────────────────────────────────
 :install
 echo.
@@ -62,17 +126,45 @@ echo  注册 Windows 任务计划程序
 echo ====================================================
 echo  任务名称: %TASK_NAME%
 echo  执行时间: 每天 %RUN_TIME%
-echo  工作目录: %WORK_DIR%
-echo  Python:   %PYTHON_EXE%
-echo  脚本:     %RUN_PY%
+echo  工作目录: %CD%
+echo  Python:   venv\Scripts\python.exe
+echo  脚本:     run.py
 echo ====================================================
 echo.
+
+:: 执行环境预检
+call :preflight
+if "!CHECK_FAIL!"=="1" goto :end
+
+:: 检查是否已有构建产物
+set NEED_INIT=0
+if not exist "..\processed" set NEED_INIT=1
+if "!NEED_INIT!"=="0" (
+    dir /b "..\processed\" 2>nul | findstr /r "." >nul 2>&1
+    if errorlevel 1 set NEED_INIT=1
+)
+
+if "!NEED_INIT!"=="1" (
+    echo [初始化] 未检测到已构建数据，首次执行全量同步...
+    echo.
+    "venv\Scripts\python.exe" "run.py" --full
+    if errorlevel 1 (
+        echo.
+        echo [警告] 首次全量同步失败（退出码: !ERRORLEVEL!），定时任务仍将注册
+        echo        请检查日志后手动运行: start.bat --full
+        echo.
+    ) else (
+        echo.
+        echo [初始化] 首次全量同步完成
+        echo.
+    )
+)
 
 schtasks /Delete /TN "%TASK_NAME%" /F >nul 2>&1
 
 schtasks /Create ^
     /TN "%TASK_NAME%" ^
-    /TR "\"%PYTHON_EXE%\" \"%RUN_PY%\"" ^
+    /TR "\"%ABS_PYTHON%\" \"%ABS_RUN_PY%\"" ^
     /SC DAILY ^
     /ST %RUN_TIME% ^
     /RL HIGHEST ^
@@ -125,15 +217,18 @@ goto :end
 
 :: ─── 立即执行一次 ──────────────────────────────────────────
 :run_now
+:: 执行前也预检
+call :preflight
+if "!CHECK_FAIL!"=="1" goto :end
 echo.
 echo [执行] 立即运行一次...
 schtasks /Run /TN "%TASK_NAME%" >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     echo [成功] 任务已触发
-    echo        查看日志: logs\feishu_export_*.log
+    echo        查看日志: ..\\_runtime\logs\
 ) else (
     echo [提示] 通过任务计划触发失败，直接执行...
-    "%PYTHON_EXE%" "%RUN_PY%"
+    "venv\Scripts\python.exe" "run.py"
 )
 goto :end
 

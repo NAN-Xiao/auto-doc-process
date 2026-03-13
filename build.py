@@ -88,7 +88,7 @@ def build(include_models: bool = False, include_venv: bool = False,
     ignore_list = [
         "venv", "__pycache__", "*.pyc", "*.pyo",
         "build.py", "dist", ".git", ".gitignore",
-        "*.log", ".feishu_export*", "_runtime", "tools",
+        "*.log", ".feishu_export*", "_runtime",
     ]
     if not include_models:
         ignore_list.append("models")
@@ -98,6 +98,15 @@ def build(include_models: bool = False, include_venv: bool = False,
         ignore=shutil.ignore_patterns(*ignore_list),
     )
     print("[复制] 项目文件已复制")
+
+    # 删除 tools/ 中的开发专用脚本，保留运行时所需脚本
+    tools_dist = dist_dir / "tools"
+    if tools_dist.exists():
+        for name in ["export_onnx.py"]:
+            f = tools_dist / name
+            if f.exists():
+                f.unlink()
+        print("[清理] 已移除开发专用脚本")
 
     # --slim：仅保留 ONNX 模型，删除 HuggingFace 原始模型
     if slim and include_models:
@@ -136,14 +145,15 @@ def build(include_models: bool = False, include_venv: bool = False,
         sys.exit(1)
     print("[编译] 全部编译完成")
 
-    # ─── 5. 删除 .py 源码（仅保留 run.py 启动入口） ─────────
-    # run.py 只有 15 行引导代码，无任何业务逻辑，保留为 .py 方便 bat 调用
-    keep_source = {"run.py"}
+    # ─── 5. 删除 .py 源码（保留入口和运行时脚本） ──────────
+    # run.py: 启动入口; tools/preflight_check.py: deploy.bat 预检脚本
+    keep_source_paths = {
+        dist_dir / "run.py",
+        dist_dir / "tools" / "preflight_check.py",
+    }
     deleted = 0
     for py_file in dist_dir.rglob("*.py"):
-        rel = py_file.relative_to(dist_dir)
-        # 只保留根目录下的 run.py
-        if py_file.name in keep_source and py_file.parent == dist_dir:
+        if py_file.resolve() in {p.resolve() for p in keep_source_paths}:
             continue
         py_file.unlink()
         deleted += 1
