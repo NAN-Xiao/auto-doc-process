@@ -52,7 +52,7 @@ lightrag:
   # 图谱构建参数
   # -----------------------------------------
   graph:
-    chunk_token_size: 1500               # LightRAG 内部分块大小（token）
+    chunk_token_size: 4000               # LightRAG 内部分块大小（token）— 越大则 LLM 调用越少、越快
     chunk_overlap_token_size: 200        # 分块重叠
     entity_extract_max_gleaning: 0       # 实体抽取最大轮数（越多越全但越慢）
     max_graph_nodes: 1000                # 最大图节点数
