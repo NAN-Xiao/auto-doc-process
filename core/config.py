@@ -119,6 +119,18 @@ def _load_yaml(name: str) -> dict:
     return _yaml_cache[name]
 
 
+def clear_config_cache():
+    """
+    清除所有配置缓存，下次 load_*() 调用时重新从磁盘读取。
+
+    在 scheduler 守护模式下每次执行循环开始时调用，
+    确保运行期间修改的配置文件能够热更新生效。
+    """
+    global _processor_config
+    _yaml_cache.clear()
+    _processor_config = None
+
+
 # ==================== 飞书凭证 ====================
 
 def _find_config_file(config_path: str = None) -> Path:
@@ -151,11 +163,22 @@ def load_feishu_config(config_path: str = None) -> dict:
     Returns:
         feishu 配置节的完整字典
     """
-    import yaml
-
-    path = _find_config_file(config_path)
-    with open(path, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+    if config_path:
+        # 自定义路径：直接读取，不走缓存
+        import yaml
+        path = Path(config_path)
+        if not path.exists():
+            raise ConfigError(f"配置文件不存在: {path}")
+        with open(path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+    else:
+        # 默认路径：走 _load_yaml 缓存
+        path = _find_config_file(None)
+        config = _load_yaml(path.name) if path.parent.resolve() == CONFIGS_DIR.resolve() else None
+        if config is None:
+            import yaml
+            with open(path, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f)
 
     feishu = config.get("feishu", {})
     log.info(f"加载配置: {path}")

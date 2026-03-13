@@ -317,6 +317,7 @@ class PgGraphExporter:
         chunks_data: List[Dict[str, Any]],
         batch_timestamp: str,
         embedding_func=None,
+        entity_embed_batch: int = 32,
     ) -> Dict[str, int]:
         """
         将图谱数据（实体 + 关系 + chunks）在 **单个事务** 中导出到 PostgreSQL
@@ -360,10 +361,9 @@ class PgGraphExporter:
                 embed_keys.append(name)
 
             try:
-                EMBED_BATCH = 32  # 分批防止 OOM
-                for i in range(0, len(embed_texts), EMBED_BATCH):
-                    batch_texts = embed_texts[i:i + EMBED_BATCH]
-                    batch_keys = embed_keys[i:i + EMBED_BATCH]
+                for i in range(0, len(embed_texts), entity_embed_batch):
+                    batch_texts = embed_texts[i:i + entity_embed_batch]
+                    batch_keys = embed_keys[i:i + entity_embed_batch]
                     vectors = loop.run_until_complete(embedding_func.func(batch_texts))
                     for key, vec in zip(batch_keys, vectors):
                         entity_embeddings[key] = vec.tolist() if hasattr(vec, 'tolist') else list(vec)
@@ -769,9 +769,11 @@ class LightRAGGraphBuilder:
                 exporter.init_tables()
 
                 # 单事务原子导出：实体 + 关系 + chunks
+                perf_cfg = self.config.get("performance", {})
                 pg_result = exporter.export_all(
                     self.rag, all_chunks_data, batch_timestamp,
                     embedding_func=self._embedding_func,
+                    entity_embed_batch=perf_cfg.get("entity_embed_batch", 32),
                 )
             else:
                 Logger.warning("未配置数据库，跳过 PostgreSQL 导出")

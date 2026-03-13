@@ -1,98 +1,57 @@
-# ============================================================
-# 飞书文档自动同步 - 配置文件模板
-# 由系统定时任务（Windows 任务计划程序）调度执行
-# 复制本文件为 feishu.yaml 并填入实际值
-# ============================================================
-#
-# 服务器最低配置:
-#   CPU:  2 核
-#   RAM:  4 GB
-#   磁盘: 10 GB（含 venv + 模型 + 文档缓存）
-#
-# 推荐配置:
-#   CPU:  4 核
-#   RAM:  8 GB
-#   磁盘: 20 GB
-#
-# 系统要求:
-#   Python 3.11.x
-#   PostgreSQL 14+ with pgvector 扩展
-#
-# 轻量部署（ONNX 模式）:
-#   先在开发机运行 tools/export_onnx.py 导出模型
-# ============================================================
+# 飞书文档同步配置
+# 复制本文件为 feishu.yaml 并填入真实凭证
 
 feishu:
-  # -------------------- 飞书应用凭证 --------------------
-  app_id: "YOUR_APP_ID"                  # 飞书应用 App ID
-  app_secret: "YOUR_APP_SECRET"          # 飞书应用 App Secret
-  base_url: "https://open.feishu.cn"     # 飞书 API 地址（私有化部署可改）
+  # 应用凭证（必填，从飞书开放平台获取）
+  app_id: ""             # App ID
+  app_secret: ""         # App Secret
+  base_url: "https://open.feishu.cn"   # API 地址
 
-  # -------------------- 输出目录 --------------------
-  # 文档下载到哪个目录（支持绝对路径和相对路径，相对路径基于 auto-doc/ 目录）
-  # 留空则使用默认值: <项目根>/feishu_exports
-  # "../" = auto-doc 的上层目录（doctment/），脚本工程和文档放在一起
+  # 输出目录（留空=默认；可设相对或绝对路径）
   output_dir: "../"
 
-  # -------------------- 同步范围 --------------------
-  # 指定要同步的知识空间 ID 列表（空 = 遍历全部有权限的知识空间）
+  # 同步空间（为空表示全部有权限空间）
   space_ids: []
   # space_ids:
   #   - "7613735903789370589"
-  #   - "7613735903789370590"
 
-  # -------------------- 日志配置 --------------------
+  # 日志
   log:
-    level: "INFO"             # 日志级别: DEBUG / INFO / WARNING / ERROR
-    dir: ""                   # 日志目录（留空 = <父目录>/_runtime/logs）
+    level: "INFO"
+    dir: ""
 
-  # -------------------- 导出参数 --------------------
+  # 导出参数
   export:
-    # 导出任务轮询参数
-    poll_max_wait: 300        # 导出任务最大等待时间（秒），大文档需要更久
+    poll_max_wait: 300        # 导出最大等待（秒）
     poll_interval: 3          # 轮询间隔（秒）
-    poll_initial_delay: 5     # 创建任务后的初始等待时间（秒）
+    poll_initial_delay: 5     # 创建任务初始等待（秒）
+    rate_limit_delay: 1       # 两次导出最小间隔（秒）
 
-    # 限速：两次导出之间的间隔（秒），防止触发飞书频率限制
-    rate_limit_delay: 1
-
-    # 文档类型 → 导出格式映射
-    # 支持的类型: doc, docx, sheet, bitable
-    # 支持的格式: docx, pdf, xlsx, csv
     type_format_map:
       doc: "docx"
       docx: "docx"
-      # sheet: "xlsx"       # 项目不处理 Excel，如需启用请取消注释
-      # bitable: "xlsx"
+      #sheet: "xlsx"
+      #bitable: "xlsx"
 
-    # 不可导出的文档类型（遇到直接跳过，不报错）
     skip_types:
       - "mindnote"
       - "file"
       - "slides"
       - "catalog"
 
-  # -------------------- 向量化入库 --------------------
-  # 下载文档后自动触发文档处理管线（拆分 → 向量化 → 存入 pgvector）
-  # 向量模型 / 分块参数统一在 doc_splitter.yaml 的 embedding 和 text_splitter 中配置
-  # 数据库连接配置见 configs/db_info.yml
+  # 向量化（详细参数见 doc_splitter.yaml）
   vectorize:
-    enabled: true               # 是否启用向量化入库（仅开关，参数见 doc_splitter.yaml）
+    enabled: true
 
-  # -------------------- 增量清单 --------------------
+  # 增量清单
   manifest:
-    # 增量下载清单文件路径（留空 = <父目录>/_runtime/manifest.json）
     path: ""
 
-  # -------------------- 定时调度 --------------------
-  # Windows 任务计划程序：deploy.bat install 注册为每天凌晨执行
-  # 内置调度器：python run.py --schedule 启动守护进程（备用方案）
+  # 定时任务
   schedule:
-    run_time: "02:00"         # 每天执行时间（deploy.bat 会自动读取此值）
-    run_on_start: true        # 内置调度器：启动时是否立即执行一次
+    run_time: "02:00"
+    run_on_start: true
 
-  # -------------------- 进程锁 --------------------
+  # 进程锁
   lock:
-    # 进程锁文件路径（留空 = <父目录>/_runtime/.lock）
     path: ""
-

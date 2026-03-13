@@ -168,7 +168,13 @@ def step_process(config: dict, download_result: dict = None,
     log.info("=" * 50)
 
     # ── 子进程隔离处理（崩溃保护） ──
-    proc_results = _run_process_with_isolation(items_to_process, batch_timestamp)
+    # 从 lightrag.yaml 读取性能参数
+    from .processor.graph_builder import load_lightrag_config as _load_lr_cfg
+    _perf = _load_lr_cfg().get("performance", {})
+    proc_results = _run_process_with_isolation(
+        items_to_process, batch_timestamp,
+        max_crash_restarts=_perf.get("max_crash_restarts", 5),
+    )
 
     proc_success = sum(1 for r in proc_results if r and r.get("success") and not r.get("skipped"))
     proc_skip = sum(1 for r in proc_results if r and r.get("skipped"))
@@ -244,7 +250,8 @@ def _collect_items_to_process(config: dict, download_result: dict,
     return valid
 
 
-def _run_process_with_isolation(items: list, batch_timestamp: str) -> list:
+def _run_process_with_isolation(items: list, batch_timestamp: str,
+                                max_crash_restarts: int = 5) -> list:
     """
     在子进程中处理文档（崩溃隔离）
 
@@ -261,7 +268,6 @@ def _run_process_with_isolation(items: list, batch_timestamp: str) -> list:
     Returns:
         所有文档的处理结果列表
     """
-    MAX_CRASH_RESTARTS = 5
     run_py = str(MODULE_DIR / "run.py")
     all_results = []
     remaining = list(items)
@@ -342,7 +348,7 @@ def _run_process_with_isolation(items: list, batch_timestamp: str) -> list:
 
                 remaining = new_remaining
 
-                if crash_count >= MAX_CRASH_RESTARTS:
+                if crash_count >= max_crash_restarts:
                     log.error(f"子进程连续崩溃 {crash_count} 次，放弃剩余 {len(remaining)} 个文档")
                     for item in remaining:
                         all_results.append({
@@ -1063,8 +1069,8 @@ def main():
 
 def _entry():
     """包入口（由 run.py 显式调用，不在 import 时自动执行）"""
-try:
-    main()
-except ConfigError as e:
-    log.error(str(e))
-    sys.exit(1)
+    try:
+        main()
+    except ConfigError as e:
+        log.error(str(e))
+        sys.exit(1)

@@ -294,63 +294,6 @@ def create_export_task(client, doc_token: str, doc_type: str, file_ext: str) -> 
     return ticket
 
 
-def poll_export_task(client, ticket: str, doc_token: str,
-                     max_wait: int = 60, interval: int = 2,
-                     initial_delay: int = 3) -> dict:
-    """
-    步骤2：轮询导出任务状态
-
-    Args:
-        client: lark_oapi Client
-        ticket: 导出任务 ticket
-        doc_token: 文档 token
-        max_wait: 最大等待时间（秒）
-        interval: 轮询间隔（秒）
-        initial_delay: 创建任务后的初始等待时间（秒）
-
-    Returns:
-        {"file_token": ..., "file_name": ..., "file_size": ...} 或 None
-    """
-    from lark_oapi.api.drive.v1 import GetExportTaskRequest
-
-    time.sleep(initial_delay)  # 等待服务端开始处理
-
-    start_time = time.time()
-
-    while time.time() - start_time < max_wait:
-        request = GetExportTaskRequest.builder() \
-            .ticket(ticket) \
-            .token(doc_token) \
-            .build()
-
-        response = client.drive.v1.export_task.get(request)
-
-        if not response.success():
-            log.error(f"查询任务失败: code={response.code}, msg={response.msg}")
-            return None
-
-        result = response.data.result if response.data else None
-        if result:
-            file_token = getattr(result, "file_token", None)
-            job_status = getattr(result, "job_status", None)
-
-            if file_token:
-                return {
-                    "file_token": file_token,
-                    "file_name": getattr(result, "file_name", None),
-                    "file_size": getattr(result, "file_size", None),
-                }
-            elif job_status in (2, 3):
-                err = getattr(result, "job_error_msg", "未知")
-                log.error(f"导出任务失败: {err}")
-                return None
-
-        time.sleep(interval)
-
-    log.error(f"导出超时 ({max_wait}s)")
-    return None
-
-
 def download_export_file(client, file_token: str, output_path: str) -> bool:
     """
     步骤3：下载导出文件

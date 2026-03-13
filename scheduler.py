@@ -29,12 +29,9 @@ os.chdir(project_parent)
 if project_parent not in sys.path:
     sys.path.insert(0, project_parent)
 
-PKG = "auto-doc-process"
+PKG = "auto_doc_process"
 
-# 导入包
-importlib.import_module(PKG)
-
-# 导入核心模块
+# 导入核心模块（由 run.py --schedule 启动时，_PkgFinder 已注册 auto_doc_process 包）
 config_mod = importlib.import_module(f"{PKG}.core.config")
 main_mod = importlib.import_module(f"{PKG}.__main__")
 
@@ -95,15 +92,19 @@ def run_scheduler(
 
         start_time = datetime.now()
         try:
+            # 清除缓存，确保读取最新配置文件
+            config_mod.clear_config_cache()
             config = config_mod.load_full_config()
             log_level = config.get("log_level", "INFO")
             config_mod.setup_logging(log_level, config.get("log_dir", ""))
 
+            # build_graph=False → 跳过 graph 阶段
+            steps = None if build_graph else ["download", "process", "store"]
             main_mod.run_sync(
                 config,
                 full=full,
                 dry_run=False,
-                build_graph=build_graph,
+                steps=steps,
             )
             log.info(f"本次执行完成，耗时 {(datetime.now() - start_time).total_seconds():.1f} 秒")
         except SystemExit:

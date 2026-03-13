@@ -138,6 +138,28 @@ def build(include_models: bool = False, include_venv: bool = False,
         if f.exists():
             f.unlink()
 
+    # ─── 3.6 写入版本号 ──────────────────────────────────────
+    try:
+        # 从 __init__.py 中读取 __version__
+        init_file = src_dir / "__init__.py"
+        version = "unknown"
+        if init_file.exists():
+            import re as _re
+            text = init_file.read_text(encoding="utf-8")
+            m = _re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', text)
+            if m:
+                version = m.group(1)
+        from datetime import datetime as _dt
+        build_time = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+        version_file = dist_dir / "version.txt"
+        version_file.write_text(
+            f"version={version}\nbuild_time={build_time}\npython={py_ver}\n",
+            encoding="utf-8",
+        )
+        print(f"[版本] 写入 version.txt: v{version} ({build_time})")
+    except Exception as e:
+        print(f"[警告] 写入 version.txt 失败: {e}")
+
     # ─── 4. 编译 .py → __pycache__/*.cpython-3XX.pyc ────────
     print("[编译] 编译 Python 字节码（unchecked-hash 模式，无需源码校验）...")
     ok = compileall.compile_dir(
@@ -230,38 +252,185 @@ def build(include_models: bool = False, include_venv: bool = False,
     )
     print("[生成] setup.bat（目标机首次部署脚本）")
 
-    # ─── 8. 移动 bat 到外层并调整路径 ──────────────────────
+    # ─── 8. 生成外层精简 bat（避免中文注释在 cmd 中解析出错）───
     parent_dist = dist_dir.parent  # dist/
     proj_name = dist_dir.name      # auto-doc-process
 
-    # deploy.bat: 内部用 cd /d "%~dp0" → 改为 cd /d "%~dp0<proj_name>"
-    deploy_src = dist_dir / "deploy.bat"
-    if deploy_src.exists():
-        content = deploy_src.read_text(encoding="utf-8")
-        content = content.replace(
-            'cd /d "%~dp0"',
-            f'cd /d "%~dp0{proj_name}"',
-        )
-        (parent_dist / "deploy.bat").write_text(content, encoding="utf-8")
-        deploy_src.unlink()
+    # 删除内部 bat（外层替代）
+    for bat in ("deploy.bat", "start.bat"):
+        p = dist_dir / bat
+        if p.exists():
+            p.unlink()
 
-    # start.bat: 内部用 cd /d "%~dp0.." → 改为 cd /d "%~dp0"（外层就是父目录）
-    #            锁文件 %~dp0..\_runtime → %~dp0_runtime
-    start_src = dist_dir / "start.bat"
-    if start_src.exists():
-        content = start_src.read_text(encoding="utf-8")
-        content = content.replace(
-            'cd /d "%~dp0.."',
-            'cd /d "%~dp0"',
-        )
-        content = content.replace(
-            '%~dp0..\\',
-            '%~dp0',
-        )
-        (parent_dist / "start.bat").write_text(content, encoding="utf-8")
-        start_src.unlink()
+    # ── 外层 deploy.bat：转发到内部项目目录执行 ──
+    deploy_lines = [
+        '@echo off',
+        'chcp 65001 >nul',
+        'setlocal enabledelayedexpansion',
+        f'cd /d "%~dp0{proj_name}"',
+        '',
+        'set TASK_NAME=FeishuDocSync',
+        'set RUN_TIME=02:00',
+        'set ABS_PYTHON=%CD%\\venv\\Scripts\\python.exe',
+        'set ABS_RUN_PY=%CD%\\run.py',
+        '',
+        'if exist "configs\\feishu.yaml" (',
+        '    for /f "usebackq tokens=2" %%a in (`findstr /c:"run_time:" "configs\\feishu.yaml"`) do set "RUN_TIME=%%~a"',
+        ')',
+        '',
+        'if not exist "venv\\Scripts\\python.exe" (',
+        '    echo [ERROR] venv not found. Run setup.bat first.',
+        '    pause & exit /b 1',
+        ')',
+        '',
+        'if "%~1"=="" goto :usage',
+        'if /i "%~1"=="install" goto :install',
+        'if /i "%~1"=="uninstall" goto :uninstall',
+        'if /i "%~1"=="stop" goto :stop',
+        'if /i "%~1"=="start" goto :start_task',
+        'if /i "%~1"=="run" goto :run_now',
+        'if /i "%~1"=="status" goto :status',
+        'goto :usage',
+        '',
+        ':preflight',
+        'echo.',
+        'echo [Preflight] Checking environment...',
+        'set CHECK_FAIL=0',
+        'for %%f in (feishu.yaml db_info.yml doc_splitter.yaml) do (',
+        '    if not exist "configs\\%%f" (',
+        '        echo   [FAIL] Missing: configs\\%%f',
+        '        set CHECK_FAIL=1',
+        '    )',
+        ')',
+        'if "!CHECK_FAIL!"=="0" (',
+        '    "venv\\Scripts\\python.exe" "tools\\preflight_check.py" "configs"',
+        '    if errorlevel 1 set CHECK_FAIL=1',
+        ')',
+        'if "!CHECK_FAIL!"=="1" (',
+        '    echo [FAIL] Preflight failed. Fix errors above.',
+        '    goto :end',
+        ')',
+        'echo [Preflight] OK',
+        'goto :eof',
+        '',
+        ':install',
+        'call :preflight',
+        'if "!CHECK_FAIL!"=="1" goto :end',
+        'set NEED_INIT=0',
+        'if not exist "..\\processed" set NEED_INIT=1',
+        'if "!NEED_INIT!"=="0" (',
+        '    dir /b "..\\processed\\" 2>nul | findstr /r "." >nul 2>&1',
+        '    if errorlevel 1 set NEED_INIT=1',
+        ')',
+        'if "!NEED_INIT!"=="1" (',
+        '    echo [Init] First run - full sync...',
+        '    "venv\\Scripts\\python.exe" "run.py" --full',
+        ')',
+        'schtasks /Delete /TN "%TASK_NAME%" /F >nul 2>&1',
+        'schtasks /Create /TN "%TASK_NAME%" /TR "\\"%ABS_PYTHON%\\" \\"%ABS_RUN_PY%\\"" /SC DAILY /ST %RUN_TIME% /RL HIGHEST /F',
+        'if %ERRORLEVEL% EQU 0 (',
+        '    echo [OK] Task "%TASK_NAME%" registered, daily at %RUN_TIME%',
+        ') else (',
+        '    echo [FAIL] Run as Administrator',
+        ')',
+        'goto :end',
+        '',
+        ':stop',
+        'schtasks /Change /TN "%TASK_NAME%" /DISABLE >nul 2>&1',
+        'schtasks /End /TN "%TASK_NAME%" >nul 2>&1',
+        'taskkill /f /im python.exe >nul 2>&1',
+        'echo [OK] Stopped',
+        'goto :end',
+        '',
+        ':start_task',
+        'schtasks /Change /TN "%TASK_NAME%" /ENABLE >nul 2>&1',
+        'echo [OK] Task resumed',
+        'goto :end',
+        '',
+        ':run_now',
+        'call :preflight',
+        'if "!CHECK_FAIL!"=="1" goto :end',
+        '"venv\\Scripts\\python.exe" "run.py"',
+        'goto :end',
+        '',
+        ':uninstall',
+        'schtasks /End /TN "%TASK_NAME%" >nul 2>&1',
+        'schtasks /Delete /TN "%TASK_NAME%" /F',
+        'echo [OK] Task removed',
+        'goto :end',
+        '',
+        ':status',
+        'schtasks /Query /TN "%TASK_NAME%" /V /FO LIST 2>nul',
+        'if %ERRORLEVEL% NEQ 0 echo [INFO] Task not found. Run: deploy.bat install',
+        'goto :end',
+        '',
+        ':usage',
+        'echo.',
+        'echo   deploy.bat install     Register scheduled task',
+        'echo   deploy.bat stop        Stop task',
+        'echo   deploy.bat start       Resume task',
+        'echo   deploy.bat run         Run once now',
+        'echo   deploy.bat status      Show task status',
+        'echo   deploy.bat uninstall   Remove task',
+        'echo.',
+        '',
+        ':end',
+        'echo.',
+        'pause',
+        'endlocal',
+    ]
+    (parent_dist / "deploy.bat").write_bytes(
+        "\r\n".join(deploy_lines).encode("utf-8")
+    )
 
-    print(f"[移动] deploy.bat / start.bat → 外层目录（{parent_dist}）")
+    # ── 外层 start.bat：精简转发 ──
+    start_lines = [
+        '@echo off',
+        'chcp 65001 >nul',
+        'title FeishuDocSync',
+        'cd /d "%~dp0"',
+        '',
+        'if /i "%~1"=="stop" goto :do_stop',
+        'if /i "%~1"=="status" goto :do_status',
+        'if /i "%~1"=="reset" goto :do_reset',
+        '',
+        f'if not exist "{proj_name}\\venv\\Scripts\\python.exe" (',
+        f'    echo [ERROR] venv not found. Run {proj_name}\\setup.bat first.',
+        '    pause & exit /b 1',
+        ')',
+        '',
+        f'"{proj_name}\\venv\\Scripts\\python.exe" "{proj_name}\\run.py" %*',
+        'set EXIT_CODE=%ERRORLEVEL%',
+        'if %EXIT_CODE% EQU 0 (echo [OK] Done) else (echo [FAIL] Exit code: %EXIT_CODE%)',
+        'if "%~1"=="" pause',
+        'exit /b %EXIT_CODE%',
+        '',
+        ':do_stop',
+        'taskkill /f /im python.exe >nul 2>&1',
+        'set LOCK_FILE=%~dp0_runtime\\.lock',
+        'if exist "%LOCK_FILE%" del /f "%LOCK_FILE%"',
+        'echo [OK] Stopped',
+        'exit /b 0',
+        '',
+        ':do_status',
+        'tasklist /fi "imagename eq python.exe" /fo table 2>nul | findstr /i "python"',
+        'set LOCK_FILE=%~dp0_runtime\\.lock',
+        'if exist "%LOCK_FILE%" (echo Lock: ACTIVE) else (echo Lock: IDLE)',
+        'exit /b 0',
+        '',
+        ':do_reset',
+        'taskkill /f /im python.exe >nul 2>&1',
+        'set LOCK_FILE=%~dp0_runtime\\.lock',
+        'if exist "%LOCK_FILE%" del /f "%LOCK_FILE%"',
+        f'"{proj_name}\\venv\\Scripts\\python.exe" "{proj_name}\\run.py" --reset',
+        'echo [OK] Reset complete',
+        'exit /b 0',
+    ]
+    (parent_dist / "start.bat").write_bytes(
+        "\r\n".join(start_lines).encode("utf-8")
+    )
+
+    print(f"[生成] 外层 deploy.bat / start.bat（{parent_dist}）")
 
     # ─── 9. 统计 ─────────────────────────────────────────────
     total_size = sum(f.stat().st_size for f in dist_dir.rglob("*") if f.is_file())

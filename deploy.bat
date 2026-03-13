@@ -145,13 +145,29 @@ if "!NEED_INIT!"=="0" (
 )
 
 if "!NEED_INIT!"=="1" (
-    echo [初始化] 未检测到已构建数据，首次执行全量同步...
+    echo [初始化] 未检测到已构建数据，先执行 dry-run 验证配置联通性...
+    echo.
+    "venv\Scripts\python.exe" "run.py" --dry-run
+    if errorlevel 1 (
+        echo.
+        echo ====================================================
+        echo  [初始化失败] dry-run 验证未通过，定时任务不会注册
+        echo ====================================================
+        echo  请检查:
+        echo    1. configs\feishu.yaml  — app_id / app_secret 是否正确
+        echo    2. configs\db_info.yml  — 数据库连接是否正常
+        echo    3. _runtime\logs\       — 查看详细日志
+        echo.
+        echo  修复后重新运行: deploy.bat install
+        goto :end
+    )
+    echo [初始化] 配置验证通过，执行首次全量同步...
     echo.
     "venv\Scripts\python.exe" "run.py" --full
     if errorlevel 1 (
         echo.
         echo [警告] 首次全量同步失败（退出码: !ERRORLEVEL!），定时任务仍将注册
-        echo        请检查日志后手动运行: start.bat --full
+        echo        请检查日志后手动运行: deploy.bat run
         echo.
     ) else (
         echo.
@@ -247,6 +263,14 @@ goto :end
 :: ─── 状态 ──────────────────────────────────────────────────
 :status
 echo.
+echo ─── 版本信息 ───
+if exist "version.txt" (
+    type "version.txt"
+) else (
+    echo   版本信息不可用（开发模式或未打包）
+)
+echo.
+echo ─── 定时任务状态 ───
 schtasks /Query /TN "%TASK_NAME%" /V /FO LIST 2>nul
 if %ERRORLEVEL% NEQ 0 (
     echo [提示] 任务 "%TASK_NAME%" 不存在，请先运行 deploy.bat install

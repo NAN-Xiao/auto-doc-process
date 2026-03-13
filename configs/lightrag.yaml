@@ -78,6 +78,13 @@ lightrag:
   # 构建完成后将实体和关系导出到 PG 表（二次备份）
   # 数据库连接复用 db_info.yml
   # -----------------------------------------
+  # -----------------------------------------
+  # 性能调优（低配机器可减小，高配可增大）
+  # -----------------------------------------
+  performance:
+    entity_embed_batch: 32       # PG 导出时实体 embedding 批次（OOM 则调小）
+    max_crash_restarts: 5        # 子进程崩溃最大重启次数
+
   pg_export:
     enabled: false                       # 关闭 PG 导出（本地文件已足够，doc_chunks 单独入库）
     entity_table: "lightrag_entities"    # 实体表名

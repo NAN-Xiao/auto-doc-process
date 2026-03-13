@@ -390,26 +390,29 @@ class PgVectorStorage:
     # -------------------- 内部：批量插入 --------------------
 
     def _insert_chunks(self, cur, chunks: List[Dict[str, Any]], now: datetime):
-        """将一组 chunks 插入数据库（在已有事务和游标中执行）"""
-        for c in chunks:
-            cur.execute(
-                """
-                INSERT INTO doc_chunks
-                    (doc_name, doc_format, doc_timestamp, chunk_id, chunk_index,
-                     chunk_text, char_count, page_number, has_images, image_count,
-                     images_json, source_file, space_id, source_url,
-                     embedding, processed_at,
-                     created_at, updated_at)
-                VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s)
-                """,
-                (
-                    c["doc_name"], c["doc_format"], c["doc_timestamp"],
-                    c["chunk_id"], c["chunk_index"],
-                    c["chunk_text"], c["char_count"], c["page_number"],
-                    c["has_images"], c["image_count"],
-                    c["images_json"], c["source_file"],
-                    c["space_id"], c["source_url"],
-                    c["embedding"], c["processed_at"],
-                    now, now,
-                ),
+        """将一组 chunks 批量插入数据库（在已有事务和游标中执行）"""
+        if not chunks:
+            return
+        sql = """
+            INSERT INTO doc_chunks
+                (doc_name, doc_format, doc_timestamp, chunk_id, chunk_index,
+                 chunk_text, char_count, page_number, has_images, image_count,
+                 images_json, source_file, space_id, source_url,
+                 embedding, processed_at,
+                 created_at, updated_at)
+            VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s)
+        """
+        params = [
+            (
+                c["doc_name"], c["doc_format"], c["doc_timestamp"],
+                c["chunk_id"], c["chunk_index"],
+                c["chunk_text"], c["char_count"], c["page_number"],
+                c["has_images"], c["image_count"],
+                c["images_json"], c["source_file"],
+                c["space_id"], c["source_url"],
+                c["embedding"], c["processed_at"],
+                now, now,
             )
+            for c in chunks
+        ]
+        cur.executemany(sql, params)
