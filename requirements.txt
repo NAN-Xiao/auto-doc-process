@@ -1,4 +1,7 @@
-# auto-doc-process dependencies
+# auto-doc-process dependencies (full / development)
+#
+# 包含 PyTorch + sentence-transformers（开发环境）。
+# 服务器轻量部署请使用 requirements-server.txt（用 ONNX 替代 torch）。
 
 # Feishu API
 requests>=2.31.0
@@ -14,10 +17,15 @@ langchain-text-splitters>=1.0.0
 langchain-core>=1.0.0
 langchain-openai>=1.0.0
 langchain-huggingface>=1.0.0
+openai>=1.0.0
 
-# Embedding model
+# Embedding model（开发环境：torch + sentence-transformers）
 sentence-transformers>=3.0.0
 torch>=2.0.0
+
+# ONNX Runtime（服务器和开发环境都需要，用于导出/推理）
+onnxruntime>=1.17.0
+tokenizers>=0.19.0
 
 # PostgreSQL + pgvector
 psycopg[binary]>=3.1.0

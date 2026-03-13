@@ -2,13 +2,28 @@
 chcp 65001 >nul
 title FeishuDocSync
 
-REM Feishu document auto-processing pipeline - one-click start
-REM Usage:
-REM   start.bat              full pipeline (incremental)
-REM   start.bat --dry-run    preview only
-REM   start.bat --full       full sync
-REM   start.bat --no-graph   skip graph building
-REM   start.bat --schedule   start daemon scheduler
+REM Feishu document auto-processing pipeline
+REM
+REM Full pipeline (default):
+REM   start.bat                              download -> process -> store -> graph
+REM
+REM Single stage:
+REM   start.bat --step download              download only (build manifest)
+REM   start.bat --step process               split + embed only
+REM   start.bat --step store                 batch store to pgvector only
+REM   start.bat --step graph                 build LightRAG graph only
+REM
+REM Combined stages:
+REM   start.bat --step download,process      download + process (no store, no graph)
+REM   start.bat --step download,process,store  download + process + store (no graph)
+REM   start.bat --step process,store         process + store
+REM
+REM Other options:
+REM   start.bat --dry-run                    preview only (list documents)
+REM   start.bat --full                       full sync (ignore manifest)
+REM   start.bat --reset-db                   clear DB then full rebuild (implies --full)
+REM   start.bat --no-graph                   skip graph building
+REM   start.bat --schedule                   start daemon scheduler
 
 cd /d "%~dp0.."
 

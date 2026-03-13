@@ -5,6 +5,7 @@
 
 用法（在 auto-doc-process 目录下执行）：
   venv\\Scripts\\python.exe build.py                          # 基础打包
+  venv\\Scripts\\python.exe build.py --slim                   # 轻量部署（ONNX 模型 + 精简依赖）
   venv\\Scripts\\python.exe build.py --include-models         # 包含 Embedding 模型（约 100MB）
   venv\\Scripts\\python.exe build.py --include-venv           # 包含虚拟环境（约 1-2GB，目标机无需再装）
 
@@ -14,6 +15,7 @@
 注意：
   - 目标电脑的 Python 大版本须与编译版本一致（如都是 3.11.x）
   - 如果使用 --include-venv 则无需在目标机安装 Python
+  - --slim 模式下自动包含 ONNX 模型，使用 requirements-server.txt 安装依赖
 """
 
 import os
@@ -25,12 +27,17 @@ import argparse
 from pathlib import Path
 
 
-def build(include_models: bool = False, include_venv: bool = False):
+def build(include_models: bool = False, include_venv: bool = False,
+          slim: bool = False):
     src_dir = Path(__file__).parent.resolve()
     dist_root = src_dir.parent / "dist"
     dist_dir = dist_root / "auto-doc-process"
 
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+
+    # --slim 隐含包含 ONNX 模型
+    if slim:
+        include_models = True
 
     print("=" * 60)
     print("  飞书文档自动处理管线 — 打包部署")
@@ -38,6 +45,7 @@ def build(include_models: bool = False, include_venv: bool = False):
     print(f"  源目录:     {src_dir}")
     print(f"  输出目录:   {dist_dir}")
     print(f"  Python:     {py_ver} ({sys.executable})")
+    print(f"  模式:       {'轻量 (ONNX + 精简依赖)' if slim else '完整 (torch)'}")
     print(f"  包含模型:   {'是' if include_models else '否'}")
     print(f"  包含 venv:  {'是' if include_venv else '否'}")
     print("=" * 60)
@@ -52,7 +60,7 @@ def build(include_models: bool = False, include_venv: bool = False):
     ignore_list = [
         "venv", "__pycache__", "*.pyc", "*.pyo",
         "build.py", "dist", ".git", ".gitignore",
-        "*.log", ".feishu_export*", "_runtime",
+        "*.log", ".feishu_export*", "_runtime", "tools",
     ]
     if not include_models:
         ignore_list.append("models")
@@ -62,6 +70,22 @@ def build(include_models: bool = False, include_venv: bool = False):
         ignore=shutil.ignore_patterns(*ignore_list),
     )
     print("[复制] 项目文件已复制")
+
+    # --slim：仅保留 ONNX 模型，删除 HuggingFace 原始模型
+    if slim and include_models:
+        models_dist = dist_dir / "models"
+        onnx_dir = models_dist / "onnx"
+        if onnx_dir.exists():
+            # 删除非 onnx 的目录（HuggingFace 缓存）
+            for item in models_dist.iterdir():
+                if item.name != "onnx":
+                    if item.is_dir():
+                        shutil.rmtree(item)
+                    else:
+                        item.unlink()
+            print("[瘦身] 已移除 HuggingFace 原始模型，仅保留 ONNX")
+        else:
+            print("[警告] ONNX 模型不存在 (models/onnx/)，请先运行 tools/export_onnx.py")
 
     # ─── 3. 删除敏感配置（只保留 .example 模板） ─────────────
     configs_dir = dist_dir / "configs"
@@ -109,6 +133,7 @@ def build(include_models: bool = False, include_venv: bool = False):
             print("[警告] 未找到 venv/ 目录，跳过")
 
     # ─── 7. 创建 setup.bat（目标机首次部署用） ───────────────
+    req_file = "requirements-server.txt" if slim else "requirements.txt"
     setup_bat = dist_dir / "setup.bat"
     setup_bat.write_text(
         '@echo off\n'
@@ -117,7 +142,8 @@ def build(include_models: bool = False, include_venv: bool = False):
         'echo ====================================================\n'
         'echo  飞书文档自动处理 - 首次部署\n'
         'echo ====================================================\n'
-        'echo.\n'
+        + ('echo  模式: 轻量部署 (ONNX Runtime)\n' if slim else '')
+        + 'echo.\n'
         '\n'
         'cd /d "%~dp0"\n'
         '\n'
@@ -134,7 +160,7 @@ def build(include_models: bool = False, include_venv: bool = False):
         ')\n'
         '\n'
         'echo [2/3] 安装依赖...\n'
-        'venv\\Scripts\\pip install -r requirements.txt\n'
+        'venv\\Scripts\\pip install -r ' + req_file + '\n'
         'if errorlevel 1 (\n'
         '    echo [错误] 依赖安装失败\n'
         '    pause\n'
@@ -146,6 +172,10 @@ def build(include_models: bool = False, include_venv: bool = False):
         'echo   configs\\feishu.yaml.example     -^>  feishu.yaml\n'
         'echo   configs\\db_info.yml.example      -^>  db_info.yml\n'
         'echo   configs\\doc_splitter.yaml.example -^>  doc_splitter.yaml\n'
+        'echo.\n'
+        'echo 最低配置: 2 核 CPU / 4GB RAM / 10GB 磁盘\n'
+        'echo 推荐配置: 4 核 CPU / 8GB RAM / 20GB 磁盘\n'
+        'echo 系统要求: PostgreSQL 14+ (pgvector), Python ' + py_ver + '\n'
         'echo.\n'
         'echo 部署完成后运行:\n'
         'echo   start.bat                双击手动执行\n'
@@ -180,12 +210,22 @@ def build(include_models: bool = False, include_venv: bool = False):
     else:
         print(f"    2. 配置 configs/ 下的三个文件")
         print(f"    3. deploy.bat install 注册定时任务")
+    if slim:
+        print()
+        print("  轻量部署说明：")
+        print("    - 使用 ONNX Runtime 替代 PyTorch（磁盘节省 ~600MB）")
+        print("    - 依赖清单: requirements-server.txt")
+        print("    - 最低配置: 2 核 CPU / 4GB RAM / 10GB 磁盘")
     print("=" * 60)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="飞书文档自动处理 — 打包部署脚本（编译为 .pyc，不含源码）",
+    )
+    parser.add_argument(
+        "--slim", action="store_true",
+        help="轻量部署（ONNX 模型 + requirements-server.txt，磁盘 ~0.5GB vs ~1.3GB）",
     )
     parser.add_argument(
         "--include-models", action="store_true",
@@ -200,5 +240,6 @@ if __name__ == "__main__":
     build(
         include_models=args.include_models,
         include_venv=args.include_venv,
+        slim=args.slim,
     )
 

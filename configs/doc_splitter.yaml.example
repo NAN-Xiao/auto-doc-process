@@ -127,6 +127,12 @@ paths:
 # ===========================================
 # 向量模型配置
 # ===========================================
+# 引擎选择（自动判断）:
+#   1. 优先使用 ONNX Runtime（轻量，~20MB，需先导出模型）
+#      导出: python tools/export_onnx.py
+#      模型位置: models/onnx/model.onnx
+#   2. 回退到 HuggingFace/torch（完整，~450MB）
+#      首次运行自动下载模型到 cache_folder
 embedding:
   model: "BAAI/bge-small-zh-v1.5"   # 模型名称
   huggingface:

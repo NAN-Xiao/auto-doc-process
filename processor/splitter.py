@@ -19,7 +19,6 @@ import re
 # 导入 LangChain 文本分割器
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
-from langchain_openai import ChatOpenAI
 from ..core.config import load_processor_config as load_config
 from ..core.logger import Logger
 
@@ -87,7 +86,7 @@ def generate_smart_image_name_with_llm(
     context_before: str, 
     context_after: str, 
     max_length: int = 10,
-    llm: Optional[ChatOpenAI] = None,
+    llm=None,
     context_segments_before: Optional[List[ContextSegment]] = None,
     context_segments_after: Optional[List[ContextSegment]] = None
 ) -> str:
@@ -186,9 +185,17 @@ def generate_smart_image_name_with_llm(
 
 请直接输出完整的图片名称（{max_length}个中文字以内，不要标点符号和引号）："""
 
-        # 调用 LLM
-        response = llm.invoke(prompt)
-        image_name = response.content.strip()
+        # 调用 LLM（原生 openai SDK）
+        _client = llm["client"]
+        _resp = _client.chat.completions.create(
+            model=llm["model"],
+            messages=[{"role": "user", "content": prompt}],
+            temperature=llm.get("temperature", 0.7),
+            max_tokens=llm.get("max_tokens", 100),
+            frequency_penalty=llm.get("frequency_penalty", 0.0),
+            presence_penalty=llm.get("presence_penalty", 0.0),
+        )
+        image_name = _resp.choices[0].message.content.strip()
         
         # 清理结果：移除引号、特殊字符等
         image_name = re.sub(r'["\'\n\r，。！？、；：""''（）【】《》<>…·`~!@#$%^&*()\-_=+\[\]{}|\\;:,.<>?/]', '', image_name)
@@ -309,17 +316,18 @@ class DocumentSplitter:
                 llm_config = image_naming_config.get('llm', {})
                 
                 if api_key:
-                    self.llm = ChatOpenAI(
-                        model=model,
-                        openai_api_key=api_key,
-                        openai_api_base=llm_config.get('api_base', 'https://api.deepseek.com'),
-                        temperature=llm_config.get('temperature', 0.7),
-                        max_tokens=llm_config.get('max_tokens', 100),
-                        model_kwargs={
-                            'frequency_penalty': llm_config.get('frequency_penalty', 0.0),
-                            'presence_penalty': llm_config.get('presence_penalty', 0.0)
-                        }
-                    )
+                    import openai as _openai
+                    self.llm = {
+                        "client": _openai.OpenAI(
+                            api_key=api_key,
+                            base_url=llm_config.get('api_base', 'https://api.deepseek.com'),
+                        ),
+                        "model": model,
+                        "temperature": llm_config.get('temperature', 0.7),
+                        "max_tokens": llm_config.get('max_tokens', 100),
+                        "frequency_penalty": llm_config.get('frequency_penalty', 0.0),
+                        "presence_penalty": llm_config.get('presence_penalty', 0.0),
+                    }
                     Logger.info(f"LLM智能命名已启用: {model}")
                 else:
                     Logger.warning("未配置 DEEPSEEK_API_KEY，使用简单算法命名")
@@ -1256,63 +1264,31 @@ class WordSplitter(DocumentSplitter):
             json.dump(index_data, f, ensure_ascii=False, indent=2)
 
 
-def generate_output_path(input_path: Path, root_dir: str = "processed", 
-                        structure: str = "nested", add_timestamp: bool = True,
-                        batch_timestamp: str = None) -> Path:
+def generate_output_path(input_path: Path, root_dir: str = "processed",
+                        **_kwargs) -> Path:
     """
-    生成输出目录路径
-    
+    生成输出目录路径（增量模式，扁平结构）
+
+    输出结构：processed/{doc_name}/
+      - 同名文档再次处理时直接覆盖旧目录
+      - 不再按批次时间戳分层
+
     Args:
         input_path: 输入文件路径
         root_dir: 输出根目录（相对于输入文件目录或绝对路径）
-        structure: 目录结构
-            - "nested": processed/时间戳/文档名/  (推荐，同一批次共享时间戳)
-            - "flat": processed/文档名_时间戳/
-            - "same": 与原文件同目录/文档名_时间戳/
-        add_timestamp: 是否添加时间戳
-        batch_timestamp: 批次时间戳（外部传入，保证同一批次共用；None 则自动生成）
-        
+        **_kwargs: 保留旧参数兼容性（batch_timestamp, add_timestamp 等已废弃）
+
     Returns:
-        输出目录路径
+        输出目录路径，如 .../processed/文档名/
     """
-    from datetime import datetime
-    
-    # 获取文档名（不含扩展名）
     doc_name = input_path.stem
-    
-    # 生成时间戳（优先使用外部传入的批次时间戳）
-    if batch_timestamp:
-        timestamp = batch_timestamp
-    else:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S") if add_timestamp else ""
-    
-    # 确定根目录
+
     if Path(root_dir).is_absolute():
-        # 绝对路径
         base_dir = Path(root_dir)
     else:
-        # 相对路径：相对于输入文件所在目录
         base_dir = input_path.parent / root_dir
-    
-    # 根据结构类型生成最终路径
-    if structure == "nested":
-        # processed/时间戳/文档名/
-        if add_timestamp or batch_timestamp:
-            return base_dir / timestamp / doc_name
-        else:
-            return base_dir / doc_name
-    elif structure == "flat":
-        # processed/文档名_时间戳/
-        if add_timestamp:
-            return base_dir / f"{doc_name}_{timestamp}"
-        else:
-            return base_dir / doc_name
-    else:  # "same"
-        # 与原文件同目录
-        if add_timestamp:
-            return input_path.parent / f"{doc_name}_{timestamp}"
-        else:
-            return input_path.parent / doc_name
+
+    return base_dir / doc_name
 
 
 def process_document(input_path: Path, output_dir: Path = None, chunk_size: int = 1000,

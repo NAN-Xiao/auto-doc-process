@@ -140,6 +140,13 @@ if "--schedule" in sys.argv:
     sys.argv.remove("--schedule")
     scheduler_mod = importlib.import_module(f"{PKG}.scheduler")
     scheduler_mod.main()
+elif "--_worker" in sys.argv:
+    # 内部子进程模式（崩溃隔离）：处理文档列表，逐条写入 JSONL
+    idx = sys.argv.index("--_worker")
+    _input_file = sys.argv[idx + 1]
+    _output_file = sys.argv[idx + 2]
+    main_mod = importlib.import_module(f"{PKG}.__main__")
+    main_mod._worker_process_documents(_input_file, _output_file)
 else:
     main_mod = importlib.import_module(f"{PKG}.__main__")
     main_mod._entry()

@@ -75,7 +75,7 @@ class BatchWorkflow:
 
         Args:
             doc_path: 文档路径
-            batch_timestamp: 批次时间戳（同一批次共用；None 则自动生成）
+            batch_timestamp: 处理时间戳（仅用于 DB 元数据，不影响目录结构）
             doc_meta: 文档来源元数据（如 space_id, source_url），用于写入 pgvector
             store_to_db: 是否立即入库（False = 只处理不入库，后续调用 batch_store）
         """
@@ -101,7 +101,8 @@ class BatchWorkflow:
         try:
             Logger.info("步骤1：拆分文档...")
 
-            output_path = generate_output_path(doc_path, batch_timestamp=batch_timestamp)
+            # 扁平目录结构: processed/{doc_name}/（不含时间戳层）
+            output_path = generate_output_path(doc_path)
 
             doc_info = process_document(
                 input_path=doc_path,
@@ -362,7 +363,7 @@ class BatchWorkflow:
             return []
     
     def process_all_documents(self) -> Dict[str, Any]:
-        """批量处理所有文档（同一批次共享时间戳）"""
+        """批量处理所有文档"""
         documents = self.scan_documents()
         
         if not documents:
@@ -374,11 +375,9 @@ class BatchWorkflow:
                 'documents': []
             }
         
-        # 生成批次时间戳（所有文档共用）
         batch_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         Logger.info(f"找到 {len(documents)} 个文档待处理")
-        Logger.info(f"批次时间戳: {batch_timestamp}")
         
         results = []
         success_count = 0
@@ -404,8 +403,8 @@ class BatchWorkflow:
             'documents': results
         }
         
-        # 报告保存到批次时间戳目录下
-        report_dir = self.documents_dir / self.processed_subdir / batch_timestamp
+        # 报告保存到 processed/ 根目录
+        report_dir = self.documents_dir / self.processed_subdir
         report_dir.mkdir(parents=True, exist_ok=True)
         report_file = report_dir / "batch_report.json"
         with open(report_file, 'w', encoding='utf-8') as f:

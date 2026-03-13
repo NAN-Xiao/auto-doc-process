@@ -21,7 +21,7 @@ from datetime import datetime
 
 from ..core.config import load_processor_config as load_config
 from ..core.logger import Logger
-from langchain_huggingface import HuggingFaceEmbeddings
+from .onnx_embedder import create_embeddings
 
 
 class EmbeddingGenerator:
@@ -37,25 +37,8 @@ class EmbeddingGenerator:
         # 配置注入：优先使用传入的 config
         self.config = config if config is not None else load_config()
         
-        # 初始化 embedding 模型
-        embedding_config = self.config.get('embedding', {})
-        model_name = embedding_config.get('model', 'BAAI/bge-small-zh-v1.5')
-        
-        # 从配置读取 HuggingFace 参数
-        hf_config = embedding_config.get('huggingface', {})
-        cache_folder = hf_config.get('cache_folder', './models')
-        device = hf_config.get('device', 'cpu')
-        normalize_embeddings = hf_config.get('normalize_embeddings', True)
-        
-        Logger.info(f"加载 Embedding 模型: {model_name} (device: {device})")
-        Logger.info(f"模型缓存目录: {cache_folder}", indent=1)
-        
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name=model_name,
-            cache_folder=cache_folder,
-            model_kwargs={'device': device},
-            encode_kwargs={'normalize_embeddings': normalize_embeddings}
-        )
+        # 初始化 embedding 引擎（自动选择 ONNX 或 torch 后端）
+        self.embeddings = create_embeddings(self.config)
         
         Logger.info("Embeddings 将保存到各文档的 processed 目录")
         
@@ -176,9 +159,20 @@ class EmbeddingGenerator:
             Logger.warning("没有有效的 chunks", indent=1)
             return 0
         
-        # 生成 embeddings
-        Logger.info(f"生成 {len(texts)} 个 embeddings...", indent=1)
-        embeddings = self.embeddings.embed_documents(texts)
+        # 分批生成 embeddings（避免大文档一次性加载导致 OOM/崩溃）
+        batch_size = self.config.get('embedding', {}).get('batch_size', 16)
+        Logger.info(f"生成 {len(texts)} 个 embeddings（batch_size={batch_size}）...", indent=1)
+
+        embeddings = []
+        for batch_start in range(0, len(texts), batch_size):
+            batch_end = min(batch_start + batch_size, len(texts))
+            batch_texts = texts[batch_start:batch_end]
+            batch_embeddings = self.embeddings.embed_documents(batch_texts)
+            embeddings.extend(batch_embeddings)
+            if len(texts) > batch_size:
+                Logger.info(f"  批次 {batch_start // batch_size + 1}/"
+                            f"{(len(texts) + batch_size - 1) // batch_size}: "
+                            f"{len(batch_embeddings)} 个", indent=1)
         
         # 每个 chunk 分别保存 embedding 和 metadata
         Logger.info("保存 embeddings 和 metadata（每个 chunk 单独文件）...", indent=1)
