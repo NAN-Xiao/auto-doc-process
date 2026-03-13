@@ -132,6 +132,12 @@ def build(include_models: bool = False, include_venv: bool = False,
             f.unlink()
             print(f"[安全] 删除敏感配置: {sensitive}")
 
+    # ─── 3.5 移除内部不需要发布的脚本 ──────────────────────
+    for name in ("invoke.py",):
+        f = dist_dir / name
+        if f.exists():
+            f.unlink()
+
     # ─── 4. 编译 .py → __pycache__/*.cpython-3XX.pyc ────────
     print("[编译] 编译 Python 字节码（unchecked-hash 模式，无需源码校验）...")
     ok = compileall.compile_dir(
@@ -224,7 +230,40 @@ def build(include_models: bool = False, include_venv: bool = False,
     )
     print("[生成] setup.bat（目标机首次部署脚本）")
 
-    # ─── 8. 统计 ─────────────────────────────────────────────
+    # ─── 8. 移动 bat 到外层并调整路径 ──────────────────────
+    parent_dist = dist_dir.parent  # dist/
+    proj_name = dist_dir.name      # auto-doc-process
+
+    # deploy.bat: 内部用 cd /d "%~dp0" → 改为 cd /d "%~dp0<proj_name>"
+    deploy_src = dist_dir / "deploy.bat"
+    if deploy_src.exists():
+        content = deploy_src.read_text(encoding="utf-8")
+        content = content.replace(
+            'cd /d "%~dp0"',
+            f'cd /d "%~dp0{proj_name}"',
+        )
+        (parent_dist / "deploy.bat").write_text(content, encoding="utf-8")
+        deploy_src.unlink()
+
+    # start.bat: 内部用 cd /d "%~dp0.." → 改为 cd /d "%~dp0"（外层就是父目录）
+    #            锁文件 %~dp0..\_runtime → %~dp0_runtime
+    start_src = dist_dir / "start.bat"
+    if start_src.exists():
+        content = start_src.read_text(encoding="utf-8")
+        content = content.replace(
+            'cd /d "%~dp0.."',
+            'cd /d "%~dp0"',
+        )
+        content = content.replace(
+            '%~dp0..\\',
+            '%~dp0',
+        )
+        (parent_dist / "start.bat").write_text(content, encoding="utf-8")
+        start_src.unlink()
+
+    print(f"[移动] deploy.bat / start.bat → 外层目录（{parent_dist}）")
+
+    # ─── 9. 统计 ─────────────────────────────────────────────
     total_size = sum(f.stat().st_size for f in dist_dir.rglob("*") if f.is_file())
     pyc_count = len(list(dist_dir.rglob("*.pyc")))
     py_count = len(list(dist_dir.rglob("*.py")))
@@ -240,14 +279,23 @@ def build(include_models: bool = False, include_venv: bool = False,
     print(f"  Python:    {py_ver}（目标机须一致）")
     print()
     print("  部署到目标电脑：")
-    print(f"    1. 复制 {dist_dir.name}/ 到目标目录")
+    print(f"    1. 复制 dist/ 整个目录到目标位置")
     if not include_venv:
-        print(f"    2. 双击 setup.bat 创建虚拟环境并安装依赖")
-        print(f"    3. 配置 configs/ 下的三个文件")
-        print(f"    4. deploy.bat install 注册定时任务")
+        print(f"    2. 进入 {dist_dir.name}/ 双击 setup.bat 创建虚拟环境")
+        print(f"    3. 配置 {dist_dir.name}/configs/ 下的三个文件")
+        print(f"    4. 在外层目录运行 deploy.bat install 注册定时任务")
     else:
-        print(f"    2. 配置 configs/ 下的三个文件")
-        print(f"    3. deploy.bat install 注册定时任务")
+        print(f"    2. 配置 {dist_dir.name}/configs/ 下的三个文件")
+        print(f"    3. 在外层目录运行 deploy.bat install 注册定时任务")
+    print()
+    print("  目录结构：")
+    print(f"    目标目录/")
+    print(f"    ├── deploy.bat              ← 外层快捷入口")
+    print(f"    ├── start.bat               ← 外层快捷入口")
+    print(f"    └── {dist_dir.name}/")
+    print(f"        ├── configs/            ← 配置文件")
+    print(f"        ├── venv/               ← 虚拟环境")
+    print(f"        └── run.py              ← 程序入口")
     if slim:
         print()
         print("  轻量部署说明：")

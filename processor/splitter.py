@@ -243,7 +243,7 @@ def generate_smart_image_name_simple(context_before: str, context_after: str,
     
     # 从配置读取关键词列表
     if config is None:
-        config = load_config()
+    config = load_config()
     image_naming_config = config.get('doc_splitter', {}).get('image_naming', {})
     keywords = image_naming_config.get('keywords', [
         '图', '表', '示意', '流程', '结构', '架构', '模型', '界面', '截图'
@@ -1290,8 +1290,8 @@ def generate_output_path(input_path: Path, root_dir: str = "processed",
         base_dir = Path(root_dir)
     else:
         base_dir = input_path.parent / root_dir
-
-    return base_dir / doc_name
+    
+            return base_dir / doc_name
 
 
 def process_document(input_path: Path, output_dir: Path = None, chunk_size: int = 1000,

@@ -705,9 +705,9 @@ class LightRAGGraphBuilder:
                 loop = always_get_an_event_loop()
                 track_id = loop.run_until_complete(
                     self.rag.ainsert(
-                        doc_text,
+                    doc_text,
                         ids=[doc_name],
-                        file_paths=[str(doc_dir)],
+                    file_paths=[str(doc_dir)],
                     )
                 )
                 Logger.success(f"    图谱构建成功 (track_id: {track_id})")
