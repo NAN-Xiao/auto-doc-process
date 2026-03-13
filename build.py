@@ -27,6 +27,34 @@ import argparse
 from pathlib import Path
 
 
+def _force_rmtree(path: Path):
+    """强制删除目录树（处理 Windows 长路径 & 只读文件）"""
+    import stat
+    import subprocess as _sp
+
+    def _on_error(func, fpath, exc_info):
+        """权限不足时先去掉只读再重试"""
+        os.chmod(fpath, stat.S_IWRITE)
+        func(fpath)
+
+    try:
+        shutil.rmtree(path, onerror=_on_error)
+    except OSError:
+        # shutil 仍然失败（长路径），用 cmd 的 rmdir 兜底
+        _sp.run(
+            ["cmd", "/c", "rmdir", "/s", "/q", str(path)],
+            capture_output=True,
+        )
+        if path.exists():
+            # 最终手段：UNC 长路径前缀
+            import subprocess
+            subprocess.run(
+                ["powershell", "-Command",
+                 f'Remove-Item -LiteralPath "\\\\?\\{path}" -Recurse -Force'],
+                capture_output=True,
+            )
+
+
 def build(include_models: bool = False, include_venv: bool = False,
           slim: bool = False):
     src_dir = Path(__file__).parent.resolve()
@@ -53,7 +81,7 @@ def build(include_models: bool = False, include_venv: bool = False,
 
     # ─── 1. 清理旧构建 ───────────────────────────────────────
     if dist_dir.exists():
-        shutil.rmtree(dist_dir)
+        _force_rmtree(dist_dir)
         print("[清理] 已删除旧构建目录")
 
     # ─── 2. 复制项目到 dist ──────────────────────────────────

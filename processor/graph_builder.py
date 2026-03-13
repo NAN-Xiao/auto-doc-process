@@ -26,7 +26,9 @@ LightRAG 知识图谱构建器
 import os
 import json
 import asyncio
+import hashlib
 import logging
+import shutil
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional
@@ -554,26 +556,81 @@ class LightRAGGraphBuilder:
         Logger.separator()
         return self.rag
 
+    # ── 图谱增量清单 ──
+
+    GRAPH_MANIFEST_NAME = "_graph_manifest.json"
+
+    @staticmethod
+    def _content_hash(chunks: List[Dict[str, Any]]) -> str:
+        """计算文档所有 chunks 文本的 SHA-256 哈希，用于增量判断"""
+        h = hashlib.sha256()
+        for c in chunks:
+            h.update(c.get("content", "").encode("utf-8"))
+        return h.hexdigest()
+
+    @staticmethod
+    def _load_graph_manifest(processed_dir: Path) -> dict:
+        """
+        加载图谱增量清单
+
+        格式：{ "doc_name": {"hash": "...", "built_at": "..."}, ... }
+        """
+        manifest_path = processed_dir / LightRAGGraphBuilder.GRAPH_MANIFEST_NAME
+        if manifest_path.exists():
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    @staticmethod
+    def _save_graph_manifest(processed_dir: Path, manifest: dict):
+        """保存图谱增量清单"""
+        manifest_path = processed_dir / LightRAGGraphBuilder.GRAPH_MANIFEST_NAME
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def clear_graph_data(processed_dir: Path, working_dir: str = None):
+        """
+        清除图谱增量清单和 LightRAG 工作目录缓存
+
+        用于 --reset-db 时强制全量重建。
+        """
+        # 清除增量清单
+        manifest_path = processed_dir / LightRAGGraphBuilder.GRAPH_MANIFEST_NAME
+        if manifest_path.exists():
+            manifest_path.unlink()
+            Logger.info(f"已删除图谱清单: {manifest_path}")
+
+        # 清除 LightRAG 工作目录（缓存的图谱数据）
+        if working_dir:
+            wd = Path(working_dir)
+            if wd.exists():
+                shutil.rmtree(wd, ignore_errors=True)
+                wd.mkdir(parents=True, exist_ok=True)
+                Logger.info(f"已清空 LightRAG 工作目录: {wd}")
+
     def build_from_processed_dir(
         self,
         processed_dir: Path,
         batch_timestamp: str = None,
+        force_rebuild: bool = False,
     ) -> Dict[str, Any]:
         """
-        从 processed 目录读取所有预处理文档并构建图谱
+        从 processed 目录读取预处理文档并 **增量** 构建图谱
 
-        目录结构（扁平）：
-          processed/
-            ├─ 文档A/chunks_index.json, chunks/, ...
-            └─ 文档B/chunks_index.json, chunks/, ...
-
-        流程：
-        1. 扫描文档 → LightRAG insert（实体抽取 + 关系建模 → 写入本地 JSON/graphml）
-        2. 导出到 PostgreSQL（二次备份）
+        增量逻辑：
+          1. 加载 _graph_manifest.json（记录每个文档的内容哈希）
+          2. 对比当前 chunks 内容哈希与清单
+          3. 跳过未变化的文档，只处理新增/修改的文档
+          4. 成功后更新清单
 
         Args:
-            processed_dir: processed 根目录（如 documents/processed/）
-            batch_timestamp: 批次时间戳（仅用于 DB 标记，None 则自动生成）
+            processed_dir: processed 根目录
+            batch_timestamp: 批次时间戳（仅用于 DB 标记）
+            force_rebuild: True = 全量重建（忽略增量清单），由 --reset-db 触发
 
         Returns:
             构建报告
@@ -587,6 +644,11 @@ class LightRAGGraphBuilder:
         Logger.separator()
         Logger.info(f"从预处理目录构建图谱: {processed_dir}")
         Logger.info(f"批次时间戳: {batch_timestamp}")
+        if force_rebuild:
+            Logger.info("⚠ 全量重建模式（忽略增量清单）")
+
+        # ── 加载增量清单 ──
+        manifest = {} if force_rebuild else self._load_graph_manifest(processed_dir)
 
         # 扫描子目录（每个子目录是一个文档）
         doc_dirs = [
@@ -600,43 +662,66 @@ class LightRAGGraphBuilder:
 
         Logger.info(f"找到 {len(doc_dirs)} 个文档")
 
+        # ── 增量过滤：计算哈希，跳过未变化文档 ──
         all_chunks_data = []
         total_chunks = 0
         doc_results = []
+        skipped_count = 0
 
         for doc_dir in sorted(doc_dirs):
             doc_name = doc_dir.name
-            Logger.info(f"  处理文档: {doc_name}")
-
-            # 读取 chunks
             chunks = self._load_doc_chunks(doc_dir)
             if not chunks:
-                Logger.warning(f"    跳过: 无有效 chunks")
+                Logger.warning(f"  跳过（无有效 chunks）: {doc_name}")
                 doc_results.append({"doc_name": doc_name, "chunks": 0, "success": False})
                 continue
 
-            # 合并所有 chunk 文本为完整文档，用于 LightRAG 处理
-            doc_text = "\n\n".join(c["content"] for c in chunks)
+            # 计算当前内容哈希
+            current_hash = self._content_hash(chunks)
 
-            Logger.info(f"    chunks 数: {len(chunks)}, 总字符: {len(doc_text)}")
+            # 增量判断：哈希未变 → 跳过
+            prev = manifest.get(doc_name, {})
+            if not force_rebuild and prev.get("hash") == current_hash:
+                skipped_count += 1
+                Logger.info(f"  跳过（未变化）: {doc_name}")
+                doc_results.append({
+                    "doc_name": doc_name, "chunks": len(chunks),
+                    "success": True, "skipped": True,
+                })
+                # 仍然收集 chunk 数据用于 PG 导出
+                for chunk in chunks:
+                    chunk["doc_name"] = doc_name
+                    chunk["full_doc_id"] = doc_name
+                all_chunks_data.extend(chunks)
+                total_chunks += len(chunks)
+                continue
+
+            # ── 需要构建 ──
+            doc_text = "\n\n".join(c["content"] for c in chunks)
+            Logger.info(f"  构建文档: {doc_name} ({len(chunks)} chunks, {len(doc_text)} 字符)")
 
             try:
-                # 使用 LightRAG 的 insert 方法处理文档
-                # LightRAG >= 1.4 的 insert 是异步方法，需通过 event loop 调用
+                # 使用稳定文档 ID（不含时间戳），让 LightRAG 能识别同一文档
                 loop = always_get_an_event_loop()
                 track_id = loop.run_until_complete(
                     self.rag.ainsert(
                         doc_text,
-                        ids=[f"{doc_name}_{batch_timestamp}"],
+                        ids=[doc_name],
                         file_paths=[str(doc_dir)],
                     )
                 )
                 Logger.success(f"    图谱构建成功 (track_id: {track_id})")
 
+                # 更新增量清单
+                manifest[doc_name] = {
+                    "hash": current_hash,
+                    "built_at": datetime.now().isoformat(),
+                }
+
                 # 记录 chunk 信息（用于后续导出到 PG）
                 for chunk in chunks:
                     chunk["doc_name"] = doc_name
-                    chunk["full_doc_id"] = f"{doc_name}_{batch_timestamp}"
+                    chunk["full_doc_id"] = doc_name
                 all_chunks_data.extend(chunks)
                 total_chunks += len(chunks)
 
@@ -658,11 +743,19 @@ class LightRAGGraphBuilder:
                     "error": str(e),
                 })
 
+        built_count = sum(
+            1 for d in doc_results if d.get("success") and not d.get("skipped")
+        )
+        Logger.info(f"本次构建: {built_count} 个文档, 跳过: {skipped_count} 个（未变化）")
+
+        # ── 保存增量清单 ──
+        self._save_graph_manifest(processed_dir, manifest)
+
         # ---------- 导出到 PostgreSQL（二次备份） ----------
         pg_export_cfg = self.config.get("pg_export", {})
         pg_result = {}
 
-        if pg_export_cfg.get("enabled", True):
+        if pg_export_cfg.get("enabled", True) and built_count > 0:
             db_cfg = self.config.get("database", {})
             if db_cfg:
                 Logger.separator()
@@ -678,6 +771,8 @@ class LightRAGGraphBuilder:
                 )
             else:
                 Logger.warning("未配置数据库，跳过 PostgreSQL 导出")
+        elif built_count == 0:
+            Logger.info("无新文档需要构建，跳过 PostgreSQL 导出")
 
         # 构建报告
         report = {
@@ -685,6 +780,8 @@ class LightRAGGraphBuilder:
             "batch_timestamp": batch_timestamp,
             "processed_dir": str(processed_dir),
             "total_documents": len(doc_dirs),
+            "built_documents": built_count,
+            "skipped_documents": skipped_count,
             "success_documents": sum(1 for d in doc_results if d.get("success")),
             "total_chunks": total_chunks,
             "pg_export": pg_result,
@@ -694,7 +791,8 @@ class LightRAGGraphBuilder:
 
         Logger.separator()
         Logger.success("知识图谱构建完成")
-        Logger.info(f"文档: {report['success_documents']}/{report['total_documents']}", indent=1)
+        Logger.info(f"文档: {report['success_documents']}/{report['total_documents']}"
+                     f" (新构建 {built_count}, 跳过 {skipped_count})", indent=1)
         Logger.info(f"Chunks: {report['total_chunks']}", indent=1)
         if pg_result:
             Logger.info(

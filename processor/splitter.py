@@ -197,8 +197,8 @@ def generate_smart_image_name_with_llm(
         )
         image_name = _resp.choices[0].message.content.strip()
         
-        # 清理结果：移除引号、特殊字符等
-        image_name = re.sub(r'["\'\n\r，。！？、；：""''（）【】《》<>…·`~!@#$%^&*()\-_=+\[\]{}|\\;:,.<>?/]', '', image_name)
+        # 清理结果：移除引号、特殊字符、空格等（保证 URL 安全）
+        image_name = re.sub(r'["\'\n\r\s，。！？、；：""''（）【】《》<>…·`~!@#$%^&*()\-_=+\[\]{}|\\;:,.<>?/]', '', image_name)
         image_name = image_name.strip()
         
         # 限制长度
@@ -327,7 +327,7 @@ class DocumentSplitter:
                         "max_tokens": llm_config.get('max_tokens', 100),
                         "frequency_penalty": llm_config.get('frequency_penalty', 0.0),
                         "presence_penalty": llm_config.get('presence_penalty', 0.0),
-                    }
+                        }
                     Logger.info(f"LLM智能命名已启用: {model}")
                 else:
                     Logger.warning("未配置 DEEPSEEK_API_KEY，使用简单算法命名")
@@ -431,6 +431,7 @@ class DocumentSplitter:
             # 旧的占位符格式：[图片: images/img_001_image1.png]
             old_placeholder = f"[图片: images/{image_info.original_filename}]"
             
+            # 文件名已在生成时做过 URL 安全清洗（无空格、无特殊字符）
             # 新的占位符格式：图片：./images/副本开启界面_001.png
             new_placeholder = f"图片：./images/{image_info.smart_filename}"
             
@@ -1264,7 +1265,7 @@ class WordSplitter(DocumentSplitter):
             json.dump(index_data, f, ensure_ascii=False, indent=2)
 
 
-def generate_output_path(input_path: Path, root_dir: str = "processed",
+def generate_output_path(input_path: Path, root_dir: str = "processed", 
                         **_kwargs) -> Path:
     """
     生成输出目录路径（增量模式，扁平结构）
@@ -1272,16 +1273,18 @@ def generate_output_path(input_path: Path, root_dir: str = "processed",
     输出结构：processed/{doc_name}/
       - 同名文档再次处理时直接覆盖旧目录
       - 不再按批次时间戳分层
-
+      - doc_name 会做 URL 安全清洗（空格→下划线等）
+    
     Args:
         input_path: 输入文件路径
         root_dir: 输出根目录（相对于输入文件目录或绝对路径）
         **_kwargs: 保留旧参数兼容性（batch_timestamp, add_timestamp 等已废弃）
-
+        
     Returns:
         输出目录路径，如 .../processed/文档名/
     """
-    doc_name = input_path.stem
+    from ..core.utils import safe_filename
+    doc_name = safe_filename(input_path.stem, input_path.stem)
 
     if Path(root_dir).is_absolute():
         base_dir = Path(root_dir)

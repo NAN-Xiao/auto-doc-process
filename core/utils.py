@@ -68,10 +68,23 @@ def parse_feishu_url(url: str) -> dict:
 # ==================== 文件名 ====================
 
 def safe_filename(name: str, fallback: str) -> str:
-    """生成合法的文件名（去除 Windows 非法字符）"""
+    """生成合法且 URL 安全的文件名
+
+    处理规则：
+      1. 去除 Windows 非法字符  \\ / : * ? " < > |
+      2. 空格 → 下划线（防止 Markdown URL 断裂）
+      3. 半角 URL 特殊字符  # % & + ( ) [ ] { } → 下划线
+      4. 全角括号/特殊符号  （）【】｛｝＃％＆＋ → 下划线
+      5. 合并连续下划线、去除首尾空白和点号
+    """
     s = name or fallback
-    s = re.sub(r'[\\/:*?"<>|]', "_", s)
-    s = s.strip(". ")
+    # Windows 非法字符 + URL 特殊字符 + 空格 → 下划线（半角）
+    s = re.sub(r'[\\/:*?"<>|\s#%&+\(\)\[\]{}]', "_", s)
+    # 全角括号 / 方括号 / 花括号 / 特殊符号 → 下划线
+    s = re.sub(r'[（）【】｛｝＃％＆＋　]', "_", s)
+    # 合并连续下划线
+    s = re.sub(r'_+', '_', s)
+    s = s.strip("._ ")
     return s or fallback
 
 

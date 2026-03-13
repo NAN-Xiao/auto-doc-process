@@ -9,6 +9,7 @@ import json
 
 from ..core.config import load_processor_config as load_config
 from ..core.logger import Logger
+from ..core.utils import safe_filename
 from .splitter import process_document, generate_output_path
 from .embedder import EmbeddingGenerator
 from .storage import PgVectorStorage
@@ -151,7 +152,7 @@ class BatchWorkflow:
 
             doc_data = {
                 'path': output_path,
-                'doc_name': doc_path.stem,
+                'doc_name': safe_filename(doc_path.stem, doc_path.stem),
                 'timestamp': batch_timestamp,
                 'doc_info': {
                     'chunks_count': doc_info.total_chunks,

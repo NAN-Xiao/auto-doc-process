@@ -574,11 +574,17 @@ def _load_results_from_processed_dir(workflow, reset_db: bool = False) -> list:
 
 # ==================== 阶段 4: 图谱 ====================
 
-def step_graph():
+def step_graph(reset_db: bool = False):
     """
-    阶段 4: LightRAG 知识图谱构建
+    阶段 4: LightRAG 知识图谱构建（支持增量）
 
-    直接扫描 processed/ 目录下所有文档子目录。
+    增量逻辑：
+      - 首次运行：构建所有文档
+      - 后续运行：只构建新增/修改的文档（基于内容哈希）
+      - --reset-db：清除图谱缓存后全量重建
+
+    Args:
+        reset_db: 是否强制全量重建（清除图谱清单 + LightRAG 工作目录）
     """
     from .processor.graph_builder import LightRAGGraphBuilder, load_lightrag_config
 
@@ -606,13 +612,25 @@ def step_graph():
     log.info("=" * 50)
     log.info(f"LightRAG 图谱构建: {processed_dir}")
     log.info(f"文档数: {len(doc_dirs)}")
+    if reset_db:
+        log.info("⚠ 全量重建模式（清除图谱缓存）")
     log.info("=" * 50)
 
     builder = LightRAGGraphBuilder()
+
+    # --reset-db: 清除图谱增量清单和 LightRAG 工作目录缓存
+    if reset_db:
+        working_dir = builder._resolve_working_dir()
+        LightRAGGraphBuilder.clear_graph_data(processed_dir, working_dir)
+
     builder.initialize()
 
     batch_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    report = builder.build_from_processed_dir(processed_dir, batch_timestamp=batch_timestamp)
+    report = builder.build_from_processed_dir(
+        processed_dir,
+        batch_timestamp=batch_timestamp,
+        force_rebuild=reset_db,
+    )
 
     report_file = processed_dir / "lightrag_report.json"
     with open(report_file, "w", encoding="utf-8") as f:
@@ -660,17 +678,22 @@ def _preflight_check(config: dict, steps: list):
         if db_cfg:
             try:
                 import psycopg
+                db_host = db_cfg.get('host', '127.0.0.1')
+                db_port = db_cfg.get('port', 5432)
+                db_name = db_cfg.get('database', '')
+                db_user = db_cfg.get('user', 'postgres')
+                db_pass = db_cfg.get('password', '')
                 conn_str = (
-                    f"host={db_cfg.get('host', '127.0.0.1')} "
-                    f"port={db_cfg.get('port', 5432)} "
-                    f"dbname={db_cfg.get('dbname', 'slgRAG')} "
-                    f"user={db_cfg.get('user', 'postgres')} "
-                    f"password={db_cfg.get('password', '')}"
+                    f"host={db_host} "
+                    f"port={db_port} "
+                    f"dbname={db_name} "
+                    f"user={db_user} "
+                    f"password={db_pass}"
                 )
                 with psycopg.connect(conn_str, connect_timeout=5) as conn:
                     with conn.cursor() as cur:
                         cur.execute("SELECT 1")
-                log.info(f"  ✓ 数据库连接: {db_cfg.get('host', '127.0.0.1')}:{db_cfg.get('port', 5432)}/{db_cfg.get('dbname', 'slgRAG')}")
+                log.info(f"  ✓ 数据库连接: {db_host}:{db_port}/{db_name}")
             except Exception as e:
                 issues_fatal.append(f"数据库连接失败: {e}")
         else:
@@ -813,7 +836,7 @@ def run_sync(config: dict, full: bool = False, dry_run: bool = False,
             log.info("")
             log.info("▶ 阶段4: 知识图谱构建")
             log.info("=" * 50)
-            step_graph()
+            step_graph(reset_db=reset_db)
 
     except Exception as e:
         log.error(f"同步异常: {e}")
@@ -859,6 +882,90 @@ def _reset_all_tables(config: dict):
     log.info("")
 
 
+def _do_reset(config: dict):
+    """
+    清理所有构建产物（只清理，不重建）
+
+    清理内容：
+      1. 数据库表（doc_chunks + lightrag_* 表）
+      2. processed/ 目录（拆分/向量化的缓存）
+      3. LightRAG 工作目录（图谱缓存）
+      4. 图谱增量清单（_graph_manifest.json）
+      5. 下载增量清单（manifest.json）
+      6. 锁文件
+    """
+    import shutil
+    from .core.config import RUNTIME_DIR
+
+    log.info("")
+    log.info("=" * 50)
+    log.info("⚠ 全量清理（Reset）")
+    log.info("=" * 50)
+
+    # ── 1. 清空数据库表 ──
+    db_cfg = config.get("db")
+    if db_cfg:
+        try:
+            from .processor.storage import PgVectorStorage
+            vec_storage = PgVectorStorage(db_config=db_cfg)
+            vec_storage.reset_table()
+            log.info("  ✓ doc_chunks 表已清空")
+        except Exception as e:
+            log.warning(f"  doc_chunks 清空失败: {e}")
+
+        try:
+            from .processor.graph_builder import PgGraphExporter, load_lightrag_config
+            lightrag_cfg = load_lightrag_config()
+            pg_export_cfg = lightrag_cfg.get("pg_export", {})
+            exporter = PgGraphExporter(db_cfg, pg_export_cfg)
+            exporter.reset_tables()
+            log.info("  ✓ 图谱表已清空")
+        except Exception as e:
+            log.warning(f"  图谱表清空失败: {e}")
+    else:
+        log.info("  -- 未配置数据库，跳过")
+
+    # ── 2. 清理 processed/ 目录 ──
+    processed_dir = _resolve_processed_dir()
+    if processed_dir.exists():
+        shutil.rmtree(processed_dir, ignore_errors=True)
+        processed_dir.mkdir(parents=True, exist_ok=True)
+        log.info(f"  ✓ processed/ 已清空: {processed_dir}")
+    else:
+        log.info("  -- processed/ 不存在，跳过")
+
+    # ── 3. 清理 LightRAG 工作目录 ──
+    try:
+        from .processor.graph_builder import LightRAGGraphBuilder
+        builder = LightRAGGraphBuilder()
+        working_dir = builder._resolve_working_dir()
+        wd = Path(working_dir)
+        if wd.exists():
+            shutil.rmtree(wd, ignore_errors=True)
+            wd.mkdir(parents=True, exist_ok=True)
+            log.info(f"  ✓ LightRAG 工作目录已清空: {wd}")
+    except Exception as e:
+        log.warning(f"  LightRAG 目录清空失败: {e}")
+
+    # ── 4. 清理下载增量清单 ──
+    manifest_path = Path(config.get("manifest_path", RUNTIME_DIR / "manifest.json"))
+    if manifest_path.exists():
+        manifest_path.unlink()
+        log.info(f"  ✓ 下载清单已删除: {manifest_path}")
+    else:
+        log.info("  -- 下载清单不存在，跳过")
+
+    # ── 5. 清理锁文件 ──
+    lock_path = Path(config.get("lock_path", RUNTIME_DIR / ".lock"))
+    if lock_path.exists():
+        lock_path.unlink()
+        log.info(f"  ✓ 锁文件已清除")
+
+    log.info("")
+    log.info("✓ 全量清理完成。下次运行将从零开始。")
+    log.info("")
+
+
 def _resolve_processed_dir() -> Path:
     """获取 processed 目录路径"""
     from .core.config import MODULE_DIR
@@ -898,6 +1005,7 @@ def main():
   run.py --dry-run                    # 预览（列出文档不下载）
   run.py --full                       # 全量同步（忽略增量清单）
   run.py --reset-db                   # 清空数据库 → 全量重建（隐含 --full）
+  run.py --reset                      # 只清理（数据库+缓存+清单），不重建
         """,
     )
 
@@ -911,6 +1019,8 @@ def main():
                         help="跳过图谱构建步骤（等同于去掉 graph 阶段）")
     parser.add_argument("--reset-db", action="store_true",
                         help="清空数据库后全量重建（删除 doc_chunks + 图谱表，然后重新处理并入库）")
+    parser.add_argument("--reset", action="store_true",
+                        help="只清理不重建（清空数据库 + processed/ + 图谱缓存 + 增量清单）")
     parser.add_argument("--log-level", type=str, default=None,
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                         help="指定日志级别（默认从配置文件读取）")
@@ -920,6 +1030,11 @@ def main():
     config = load_full_config()
     log_level = args.log_level or config["log_level"]
     setup_logging(log_level, config["log_dir"])
+
+    # --reset: 只清理，不运行管线
+    if args.reset:
+        _do_reset(config)
+        return
 
     if not config.get("app_id") or not config.get("app_secret"):
         log.error("缺少飞书凭证 (app_id / app_secret)")

@@ -32,7 +32,7 @@ lightrag:
     api_base: "https://api.deepseek.com"
     # api_key 从 doc_splitter.yaml 的 deepseek.api_key 读取
     model: "deepseek-chat"
-    max_async: 4              # 最大并发 LLM 请求数
+    max_async: 8              # 最大并发 LLM 请求数
     max_token_size: 32768     # 模型最大 token 窗口
     timeout: 180              # 单次请求超时（秒）
 
@@ -52,11 +52,11 @@ lightrag:
   # 图谱构建参数
   # -----------------------------------------
   graph:
-    chunk_token_size: 1200               # LightRAG 内部分块大小（token）
-    chunk_overlap_token_size: 100        # 分块重叠
-    entity_extract_max_gleaning: 1       # 实体抽取最大轮数（越多越全但越慢）
+    chunk_token_size: 1500               # LightRAG 内部分块大小（token）
+    chunk_overlap_token_size: 200        # 分块重叠
+    entity_extract_max_gleaning: 0       # 实体抽取最大轮数（越多越全但越慢）
     max_graph_nodes: 1000                # 最大图节点数
-    max_parallel_insert: 2               # 并行插入任务数
+    max_parallel_insert: 4               # 并行插入任务数
     enable_llm_cache: true               # 启用 LLM 结果缓存
 
   # -----------------------------------------
