@@ -15,7 +15,7 @@
 注意：
   - 目标电脑的 Python 大版本须与编译版本一致（如都是 3.11.x）
   - 如果使用 --include-venv 则无需在目标机安装 Python
-  - --slim 模式下自动包含 ONNX 模型，使用 requirements-server.txt 安装依赖
+  - --slim 模式下自动包含 ONNX 模型，仅打包轻量依赖
 """
 
 import os
@@ -133,7 +133,7 @@ def build(include_models: bool = False, include_venv: bool = False,
             print("[警告] 未找到 venv/ 目录，跳过")
 
     # ─── 7. 创建 setup.bat（目标机首次部署用） ───────────────
-    req_file = "requirements-server.txt" if slim else "requirements.txt"
+    req_file = "requirements.txt"
     setup_bat = dist_dir / "setup.bat"
     setup_bat.write_text(
         '@echo off\n'
@@ -214,7 +214,7 @@ def build(include_models: bool = False, include_venv: bool = False,
         print()
         print("  轻量部署说明：")
         print("    - 使用 ONNX Runtime 替代 PyTorch（磁盘节省 ~600MB）")
-        print("    - 依赖清单: requirements-server.txt")
+        print("    - 依赖清单: requirements.txt（默认轻量模式）")
         print("    - 最低配置: 2 核 CPU / 4GB RAM / 10GB 磁盘")
     print("=" * 60)
 
@@ -225,7 +225,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--slim", action="store_true",
-        help="轻量部署（ONNX 模型 + requirements-server.txt，磁盘 ~0.5GB vs ~1.3GB）",
+        help="轻量部署（仅包含 ONNX 模型，不含 HuggingFace 缓存）",
     )
     parser.add_argument(
         "--include-models", action="store_true",

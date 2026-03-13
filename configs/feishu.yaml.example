@@ -18,8 +18,7 @@
 #   Python 3.11.x
 #   PostgreSQL 14+ with pgvector 扩展
 #
-# 轻量部署（ONNX 模式，磁盘 ~0.5GB vs ~1.3GB）:
-#   使用 requirements-server.txt 安装依赖
+# 轻量部署（ONNX 模式）:
 #   先在开发机运行 tools/export_onnx.py 导出模型
 # ============================================================
 
