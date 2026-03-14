@@ -312,25 +312,27 @@ class DocumentSplitter:
                 # 优先从新的 llm 配置块读取，回退到旧的 deepseek 配置（向后兼容）
                 llm_config = self.config.get('llm', {})
                 deepseek_config = self.config.get('deepseek', {})
-                
+
                 api_key = llm_config.get('api_key') or deepseek_config.get('api_key', '')
-                model = llm_config.get('default_model') or deepseek_config.get('default_model', 'deepseek-chat')
-                
-                # 读取 LLM 参数（优先从 llm 配置块，否则从 image_naming.llm）
-                image_llm_config = image_naming_config.get('llm', {})
-                
+                model = llm_config.get('model') or llm_config.get('default_model') or deepseek_config.get('default_model', 'deepseek-chat')
+
+                # 读取 LLM 参数
+                # 优先：image_naming 特有参数 > 通用 llm 配置 > 默认值
+                # 兼容旧配置：image_naming.llm.xxx（即将弃用）
+                image_llm_config = image_naming_config.get('llm', {})  # 旧配置兼容
+
                 if api_key:
                     import openai as _openai
                     self.llm = {
                         "client": _openai.OpenAI(
                             api_key=api_key,
-                            base_url=llm_config.get('api_base') or image_llm_config.get('api_base', 'https://api.deepseek.com'),
+                            base_url=llm_config.get('api_base', image_llm_config.get('api_base', 'https://api.deepseek.com')),
                         ),
                         "model": model,
-                        "temperature": llm_config.get('temperature') or image_llm_config.get('temperature', 0.7),
-                        "max_tokens": llm_config.get('max_tokens') or image_llm_config.get('max_tokens', 100),
-                        "frequency_penalty": llm_config.get('frequency_penalty') or image_llm_config.get('frequency_penalty', 0.0),
-                        "presence_penalty": llm_config.get('presence_penalty') or image_llm_config.get('presence_penalty', 0.0),
+                        "temperature": image_naming_config.get('temperature') or llm_config.get('temperature') or image_llm_config.get('temperature', 0.7),
+                        "max_tokens": image_naming_config.get('max_tokens') or llm_config.get('max_tokens') or image_llm_config.get('max_tokens', 100),
+                        "frequency_penalty": image_naming_config.get('frequency_penalty') or llm_config.get('frequency_penalty') or image_llm_config.get('frequency_penalty', 0.0),
+                        "presence_penalty": image_naming_config.get('presence_penalty') or llm_config.get('presence_penalty') or image_llm_config.get('presence_penalty', 0.0),
                         }
                     Logger.info(f"LLM智能命名已启用: {model}")
                 else:

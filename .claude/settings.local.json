@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from core.config import load_processor_config, load_db_config; c = load_processor_config\\(\\); print\\(''LLM:'', c.get\\(''llm''\\)\\); print\\(''Embedding:'', c.get\\(''embedding''\\)\\)\")"
+    ]
+  }
+}

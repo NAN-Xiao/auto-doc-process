@@ -596,10 +596,6 @@ def step_graph(reset_db: bool = False):
 
     lightrag_cfg = load_lightrag_config()
 
-    if not lightrag_cfg.get("pg_export", {}).get("enabled", True):
-        log.info("图谱未启用，跳过")
-        return None
-
     processed_dir = _resolve_processed_dir()
 
     if not processed_dir.exists():

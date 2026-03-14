@@ -1,31 +1,23 @@
 # 飞书文档同步配置
 
 feishu:
-  # 应用凭证
-  app_id: "cli_a8fb4bd58038d01c"       # App ID
-  app_secret: "B5s9jSpZOjQTEiVGckuc2b0geUJyrGFr"  # App Secret
-  base_url: "https://open.feishu.cn"   # API 地址
+  app_id: "cli_a8fb4bd58038d01c"
+  app_secret: "B5s9jSpZOjQTEiVGckuc2b0geUJyrGFr"
+  base_url: "https://open.feishu.cn"
 
-  # 输出目录（留空=默认；可设相对或绝对路径）
-  output_dir: "../"
+  output_dir: "../"         # 下载目录（相对路径）
 
-  # 同步空间（为空表示全部有权限空间）
-  space_ids: []
-  # space_ids:
-  #   - "7613735903789370589"
-  #   - "7613735903789370590"
+  space_ids: []             # 同步空间ID，空=全部
 
-  # 日志
   log:
     level: "INFO"
     dir: ""
 
-  # 导出参数
   export:
-    poll_max_wait: 300        # 导出最大等待（秒）
-    poll_interval: 3          # 轮询间隔（秒）
-    poll_initial_delay: 5     # 创建任务初始等待（秒）
-    rate_limit_delay: 1       # 两次导出最小间隔（秒）
+    poll_max_wait: 300      # 导出最大等待（秒）
+    poll_interval: 3        # 轮询间隔（秒）
+    poll_initial_delay: 5   # 初始延迟（秒）
+    rate_limit_delay: 1     # 导出间隔（秒）
 
     type_format_map:
       doc: "docx"
@@ -33,25 +25,17 @@ feishu:
       #sheet: "xlsx"
       #bitable: "xlsx"
 
-    skip_types:
-      - "mindnote"
-      - "file"
-      - "slides"
-      - "catalog"
+    skip_types: ["mindnote", "file", "slides", "catalog"]
 
-  # 向量化（详细参数见 doc_splitter.yaml）
   vectorize:
     enabled: true
 
-  # 增量清单
   manifest:
-    path: ""
+    path: ""                # 增量清单路径，空=默认
 
-  # 定时任务
   schedule:
-    run_time: "02:00"
-    run_on_start: true
+    run_time: "02:00"       # 定时运行时间
+    run_on_start: true      # 启动时运行
 
-  # 进程锁
   lock:
-    path: ""
+    path: ""                # 进程锁路径，空=默认
