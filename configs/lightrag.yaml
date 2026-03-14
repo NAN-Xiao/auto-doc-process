@@ -25,12 +25,13 @@ lightrag:
 
   # -----------------------------------------
   # LLM 配置（用于实体关系抽取）
-  # 复用 doc_splitter.yaml 中的 DeepSeek 配置
+  # 复用 doc_splitter.yaml 中的 llm 通用配置
+  # 读取路径：doc_splitter.llm
   # -----------------------------------------
   llm:
     provider: "deepseek"
     api_base: "https://api.deepseek.com"
-    # api_key 从 doc_splitter.yaml 的 deepseek.api_key 读取
+    # api_key / model / timeout 从 doc_splitter.yaml 的 llm 读取
     model: "deepseek-chat"
     max_async: 12             # 最大并发 LLM 请求数（仅网络并发，不吃本地资源）
     max_token_size: 32768     # 模型最大 token 窗口

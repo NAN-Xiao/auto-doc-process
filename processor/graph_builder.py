@@ -76,10 +76,12 @@ def load_lightrag_config() -> dict:
     proc_cfg = load_processor_config()
     db_cfg = load_db_config()
 
-    # 从 doc_splitter.yaml 读取 DeepSeek API Key
-    deepseek_key = proc_cfg.get("deepseek", {}).get("api_key", "")
+    # 从 doc_splitter.yaml 读取 LLM 配置（优先从新的 llm 块，回退到旧的 deepseek 块）
+    llm_proc = proc_cfg.get("llm", {})
+    deepseek_proc = proc_cfg.get("deepseek", {})
+    llm_key = llm_proc.get("api_key") or deepseek_proc.get("api_key", "")
     if not lightrag_cfg.get("llm", {}).get("api_key"):
-        lightrag_cfg.setdefault("llm", {})["api_key"] = deepseek_key
+        lightrag_cfg.setdefault("llm", {})["api_key"] = llm_key
 
     # 从 doc_splitter.yaml 读取 embedding 相关配置
     emb_proc = proc_cfg.get("embedding", {})
