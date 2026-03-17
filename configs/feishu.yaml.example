@@ -1,0 +1,57 @@
+# ===========================================
+# 飞书文档同步配置 - feishu.yaml
+# ===========================================
+# 复制本文件为 feishu.yaml 并填写真实凭证
+#
+# 获取方式：
+#   1. 登录 飞书开放平台 https://open.feishu.cn
+#   2. 创建企业自建应用
+#   3. 在「凭证与基础信息」中获取 App ID 和 App Secret
+#   4. 在「权限管理」中开通：wiki:wiki:readonly、docx:document:readonly 等
+# ===========================================
+
+feishu:
+  # 应用凭证（必填）
+  app_id: ""              # 飞书 App ID
+  app_secret: ""          # 飞书 App Secret
+  base_url: "https://open.feishu.cn"
+
+  # 下载目录（相对路径基于 auto-doc-process/）
+  output_dir: "../"
+
+  # 同步空间ID，空列表=同步所有有权限的空间
+  space_ids: []
+  # space_ids:
+  #   - "7613735903789370589"
+
+  log:
+    level: "INFO"         # DEBUG / INFO / WARNING / ERROR
+    dir: ""               # 日志目录，空=默认 (_runtime/logs/)
+
+  export:
+    poll_max_wait: 300    # 导出最大等待（秒）
+    poll_interval: 3      # 轮询间隔（秒）
+    poll_initial_delay: 5 # 初始延迟（秒）
+    rate_limit_delay: 1   # 导出间隔（秒）
+
+    type_format_map:
+      doc: "docx"
+      docx: "docx"
+      #sheet: "xlsx"
+      #bitable: "xlsx"
+
+    skip_types: ["mindnote", "file", "slides", "catalog"]
+
+  vectorize:
+    enabled: true         # 是否启用向量化（需配合 db_info.yml）
+
+  manifest:
+    path: ""              # 增量清单路径，空=默认
+
+  schedule:
+    task_name: "FeishuDocSync"  # Windows 定时任务名称（多实例部署时请改为不同名称）
+    run_time: "02:00"           # 定时运行时间
+    run_on_start: true          # 启动时运行
+
+  lock:
+    path: ""              # 进程锁路径，空=默认

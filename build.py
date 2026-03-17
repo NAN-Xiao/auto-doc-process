@@ -126,7 +126,7 @@ def build(include_models: bool = False, include_venv: bool = False,
 
     # ─── 3. 删除敏感配置（只保留 .example 模板） ─────────────
     configs_dir = dist_dir / "configs"
-    for sensitive in ("feishu.yaml", "db_info.yml", "doc_splitter.yaml"):
+    for sensitive in ("feishu.yaml", "db_info.yml", "doc_splitter.yaml", "lightrag.yaml"):
         f = configs_dir / sensitive
         if f.exists():
             f.unlink()
@@ -235,9 +235,10 @@ def build(include_models: bool = False, include_venv: bool = False,
         '\n'
         'echo.\n'
         'echo [3/3] 请配置以下文件：\n'
-        'echo   configs\\feishu.yaml.example     -^>  feishu.yaml\n'
-        'echo   configs\\db_info.yml.example      -^>  db_info.yml\n'
+        'echo   configs\\feishu.yaml.example        -^>  feishu.yaml\n'
+        'echo   configs\\db_info.yml.example       -^>  db_info.yml\n'
         'echo   configs\\doc_splitter.yaml.example -^>  doc_splitter.yaml\n'
+        'echo   configs\\lightrag.yaml.example     -^>  lightrag.yaml\n'
         'echo.\n'
         'echo 最低配置: 2 核 CPU / 4GB RAM / 10GB 磁盘\n'
         'echo 推荐配置: 4 核 CPU / 8GB RAM / 20GB 磁盘\n'
