@@ -263,6 +263,12 @@ def build(include_models: bool = False, include_venv: bool = False,
         if p.exists():
             p.unlink()
 
+    # README 移到外层（部署者第一眼看到）
+    readme_src = dist_dir / "README.md"
+    if readme_src.exists():
+        shutil.move(str(readme_src), str(parent_dist / "README.md"))
+        print("[生成] README.md（部署说明）")
+
     # ── 外层 deploy.bat：转发到内部项目目录执行 ──
     deploy_lines = [
         '@echo off',
@@ -286,6 +292,22 @@ def build(include_models: bool = False, include_venv: bool = False,
         ')',
         '',
         'if "%~1"=="" goto :usage',
+        '',
+        ':: Admin check for commands that need schtasks',
+        'if /i "%~1"=="install" goto :check_admin',
+        'if /i "%~1"=="uninstall" goto :check_admin',
+        'if /i "%~1"=="stop" goto :check_admin',
+        'if /i "%~1"=="start" goto :check_admin',
+        'goto :skip_admin',
+        ':check_admin',
+        'net session >nul 2>&1',
+        'if %ERRORLEVEL% NEQ 0 (',
+        '    echo [FAIL] This command requires Administrator privileges.',
+        '    echo        Right-click CMD and select "Run as administrator".',
+        '    pause & exit /b 1',
+        ')',
+        ':skip_admin',
+        '',
         'if /i "%~1"=="install" goto :install',
         'if /i "%~1"=="uninstall" goto :uninstall',
         'if /i "%~1"=="stop" goto :stop',
@@ -432,7 +454,152 @@ def build(include_models: bool = False, include_venv: bool = False,
         "\r\n".join(start_lines).encode("utf-8")
     )
 
-    print(f"[生成] 外层 deploy.bat / start.bat（{parent_dist}）")
+    # ── 外层 install.bat：双击注册定时任务（自动请求管理员权限） ──
+    install_lines = [
+        '@echo off',
+        'chcp 65001 >nul',
+        'setlocal enabledelayedexpansion',
+        'title Install FeishuDocSync',
+        '',
+        ':: ── 自动提权（注册定时任务需要管理员） ──',
+        'net session >nul 2>&1',
+        'if %ERRORLEVEL% NEQ 0 (',
+        '    echo [UAC] Requesting administrator privileges...',
+        '    powershell -Command "Start-Process cmd -ArgumentList \'/c \"\"%~f0\"\"\' -Verb RunAs"',
+        '    exit /b',
+        ')',
+        '',
+        'cd /d "%~dp0"',
+        f'cd /d "%~dp0{proj_name}"',
+        '',
+        'set TASK_NAME=FeishuDocSync',
+        'set RUN_TIME=02:00',
+        'set ABS_PYTHON=%CD%\\venv\\Scripts\\python.exe',
+        'set ABS_RUN_PY=%CD%\\run.py',
+        '',
+        'if exist "configs\\feishu.yaml" (',
+        '    for /f "usebackq tokens=2" %%a in (`findstr /c:"task_name:" "configs\\feishu.yaml"`) do set "TASK_NAME=%%~a"',
+        '    for /f "usebackq tokens=2" %%a in (`findstr /c:"run_time:" "configs\\feishu.yaml"`) do set "RUN_TIME=%%~a"',
+        ')',
+        '',
+        'if not exist "venv\\Scripts\\python.exe" (',
+        '    echo [ERROR] venv not found. Run setup.bat first.',
+        '    pause & exit /b 1',
+        ')',
+        '',
+        ':: ── Preflight ──',
+        'echo.',
+        'echo [Preflight] Checking environment...',
+        'set CHECK_FAIL=0',
+        'for %%f in (feishu.yaml db_info.yml doc_splitter.yaml) do (',
+        '    if not exist "configs\\%%f" (',
+        '        echo   [FAIL] Missing: configs\\%%f',
+        '        set CHECK_FAIL=1',
+        '    )',
+        ')',
+        'if "!CHECK_FAIL!"=="0" (',
+        '    "venv\\Scripts\\python.exe" "tools\\preflight_check.py" "configs"',
+        '    if errorlevel 1 set CHECK_FAIL=1',
+        ')',
+        'if "!CHECK_FAIL!"=="1" (',
+        '    echo [FAIL] Preflight failed. Fix errors above.',
+        '    pause & exit /b 1',
+        ')',
+        'echo [Preflight] OK',
+        '',
+        ':: ── 首次全量同步（若无历史数据） ──',
+        'set NEED_INIT=0',
+        'if not exist "..\\processed" set NEED_INIT=1',
+        'if "!NEED_INIT!"=="0" (',
+        '    dir /b "..\\processed\\" 2>nul | findstr /r "." >nul 2>&1',
+        '    if errorlevel 1 set NEED_INIT=1',
+        ')',
+        'if "!NEED_INIT!"=="1" (',
+        '    echo.',
+        '    echo [Init] First run - executing full sync...',
+        '    "venv\\Scripts\\python.exe" "run.py" --full',
+        '    if errorlevel 1 (',
+        '        echo [FAIL] Initial sync failed.',
+        '        pause & exit /b 1',
+        '    )',
+        ')',
+        '',
+        ':: ── 注册定时任务 ──',
+        'schtasks /Delete /TN "%TASK_NAME%" /F >nul 2>&1',
+        'schtasks /Create /TN "%TASK_NAME%" /TR "\\"%ABS_PYTHON%\\" \\"%ABS_RUN_PY%\\"" /SC DAILY /ST %RUN_TIME% /RL HIGHEST /F',
+        'if %ERRORLEVEL% EQU 0 (',
+        '    echo.',
+        '    echo ====================================================',
+        '    echo   [OK] Scheduled task installed successfully!',
+        '    echo   Task:  %TASK_NAME%',
+        '    echo   Time:  Daily at %RUN_TIME%',
+        '    echo ====================================================',
+        ') else (',
+        '    echo [FAIL] Failed to register scheduled task.',
+        ')',
+        'echo.',
+        'pause',
+        'endlocal',
+    ]
+    (parent_dist / "install.bat").write_bytes(
+        "\r\n".join(install_lines).encode("utf-8")
+    )
+
+    # ── 外层 uninstall.bat：双击移除定时任务（自动请求管理员权限） ──
+    uninstall_lines = [
+        '@echo off',
+        'chcp 65001 >nul',
+        'setlocal enabledelayedexpansion',
+        'title Uninstall FeishuDocSync',
+        '',
+        ':: ── 自动提权 ──',
+        'net session >nul 2>&1',
+        'if %ERRORLEVEL% NEQ 0 (',
+        '    echo [UAC] Requesting administrator privileges...',
+        '    powershell -Command "Start-Process cmd -ArgumentList \'/c \"\"%~f0\"\"\' -Verb RunAs"',
+        '    exit /b',
+        ')',
+        '',
+        f'cd /d "%~dp0{proj_name}"',
+        '',
+        'set TASK_NAME=FeishuDocSync',
+        'if exist "configs\\feishu.yaml" (',
+        '    for /f "usebackq tokens=2" %%a in (`findstr /c:"task_name:" "configs\\feishu.yaml"`) do set "TASK_NAME=%%~a"',
+        ')',
+        '',
+        ':: ── 停止正在运行的任务 ──',
+        'schtasks /End /TN "%TASK_NAME%" >nul 2>&1',
+        '',
+        ':: ── 终止可能残留的 Python 进程 ──',
+        f'for /f "tokens=2" %%i in (\'wmic process where "commandline like \'\'%%run.py%%\'\' and commandline like \'\'%%{proj_name}%%\'\'" get processid 2^>nul ^| findstr /r "[0-9]"\') do (',
+        '    echo [Stop] Terminating PID: %%i',
+        '    taskkill /PID %%i /F >nul 2>&1',
+        ')',
+        '',
+        ':: ── 删除定时任务 ──',
+        'schtasks /Delete /TN "%TASK_NAME%" /F',
+        'if %ERRORLEVEL% EQU 0 (',
+        '    echo.',
+        '    echo ====================================================',
+        '    echo   [OK] Scheduled task "%TASK_NAME%" removed.',
+        '    echo ====================================================',
+        ') else (',
+        '    echo [INFO] Task "%TASK_NAME%" not found ^(already removed^).',
+        ')',
+        '',
+        ':: ── 清理锁文件 ──',
+        'set LOCK_FILE=%~dp0_runtime\\.lock',
+        'if exist "%LOCK_FILE%" del /f "%LOCK_FILE%"',
+        '',
+        'echo.',
+        'pause',
+        'endlocal',
+    ]
+    (parent_dist / "uninstall.bat").write_bytes(
+        "\r\n".join(uninstall_lines).encode("utf-8")
+    )
+
+    print(f"[生成] 外层 install.bat / uninstall.bat / deploy.bat / start.bat（{parent_dist}）")
 
     # ─── 9. 统计 ─────────────────────────────────────────────
     total_size = sum(f.stat().st_size for f in dist_dir.rglob("*") if f.is_file())
@@ -453,16 +620,18 @@ def build(include_models: bool = False, include_venv: bool = False,
     print(f"    1. 复制 dist/ 整个目录到目标位置")
     if not include_venv:
         print(f"    2. 进入 {dist_dir.name}/ 双击 setup.bat 创建虚拟环境")
-        print(f"    3. 配置 {dist_dir.name}/configs/ 下的三个文件")
-        print(f"    4. 在外层目录运行 deploy.bat install 注册定时任务")
+        print(f"    3. 配置 {dist_dir.name}/configs/ 下的配置文件")
+        print(f"    4. 双击 install.bat 注册定时任务（自动请求管理员权限）")
     else:
-        print(f"    2. 配置 {dist_dir.name}/configs/ 下的三个文件")
-        print(f"    3. 在外层目录运行 deploy.bat install 注册定时任务")
+        print(f"    2. 配置 {dist_dir.name}/configs/ 下的配置文件")
+        print(f"    3. 双击 install.bat 注册定时任务（自动请求管理员权限）")
     print()
     print("  目录结构：")
     print(f"    目标目录/")
-    print(f"    ├── deploy.bat              ← 外层快捷入口")
-    print(f"    ├── start.bat               ← 外层快捷入口")
+    print(f"    ├── install.bat             ← 双击注册定时任务")
+    print(f"    ├── uninstall.bat           ← 双击移除定时任务")
+    print(f"    ├── start.bat               ← 手动执行一次")
+    print(f"    ├── deploy.bat              ← 高级管理（install/stop/run/status）")
     print(f"    └── {dist_dir.name}/")
     print(f"        ├── configs/            ← 配置文件")
     print(f"        ├── venv/               ← 虚拟环境")

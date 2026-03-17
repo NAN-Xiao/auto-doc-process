@@ -47,6 +47,26 @@ if not exist "venv\Scripts\python.exe" (
 
 :: 检查参数
 if "%~1"=="" goto :usage
+
+:: 需要管理员权限的命令：提前检查
+if /i "%~1"=="install" goto :check_admin
+if /i "%~1"=="uninstall" goto :check_admin
+if /i "%~1"=="stop" goto :check_admin
+if /i "%~1"=="start" goto :check_admin
+goto :skip_admin
+
+:check_admin
+net session >nul 2>&1
+if %ERRORLEVEL% NEQ 0 (
+    echo.
+    echo [错误] 此操作需要管理员权限
+    echo        请右键「以管理员身份运行」CMD 后重试
+    echo.
+    pause
+    goto :end
+)
+:skip_admin
+
 if /i "%~1"=="install" goto :install
 if /i "%~1"=="uninstall" goto :uninstall
 if /i "%~1"=="stop" goto :stop

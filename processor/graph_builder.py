@@ -47,6 +47,7 @@ from lightrag.utils import EmbeddingFunc, always_get_an_event_loop
 
 from ..core.config import load_processor_config, load_db_config, CONFIGS_DIR
 from ..core.logger import Logger
+from ..core.utils import atomic_write_json, workspace_begin_write, workspace_end_write
 
 _tenacity_logger = logging.getLogger("feishu_sync")
 
@@ -592,10 +593,9 @@ class LightRAGGraphBuilder:
 
     @staticmethod
     def _save_graph_manifest(processed_dir: Path, manifest: dict):
-        """保存图谱增量清单"""
+        """保存图谱增量清单（原子写入 + 自动重试）"""
         manifest_path = processed_dir / LightRAGGraphBuilder.GRAPH_MANIFEST_NAME
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, ensure_ascii=False, indent=2)
+        atomic_write_json(manifest_path, manifest)
 
     @staticmethod
     def clear_graph_data(processed_dir: Path, working_dir: str = None):
@@ -617,6 +617,51 @@ class LightRAGGraphBuilder:
                 shutil.rmtree(wd, ignore_errors=True)
                 wd.mkdir(parents=True, exist_ok=True)
                 Logger.info(f"已清空 LightRAG 工作目录: {wd}")
+
+    def _insert_with_retry(
+        self,
+        loop,
+        doc_text: str,
+        doc_name: str,
+        doc_dir: str,
+        *,
+        max_retries: int = 3,
+        retry_delay: float = 2.0,
+    ) -> str:
+        """
+        带自动重试的 LightRAG 文档插入。
+
+        LightRAG 在 ainsert 时会写入本地 JSON/graphml 文件，
+        如果遇到 IO 异常（磁盘、权限、并发冲突）则指数退避重试。
+        """
+        import time as _time
+
+        last_err = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                track_id = loop.run_until_complete(
+                    self.rag.ainsert(
+                        doc_text,
+                        ids=[doc_name],
+                        file_paths=[doc_dir],
+                    )
+                )
+                return track_id
+            except (IOError, OSError) as e:
+                last_err = e
+                if attempt < max_retries:
+                    delay = retry_delay * (2 ** (attempt - 1))
+                    Logger.warning(
+                        f"    ainsert IO 异常 ({doc_name}), "
+                        f"重试 {attempt}/{max_retries}, {delay:.1f}s 后: {e}"
+                    )
+                    _time.sleep(delay)
+                else:
+                    raise
+            except Exception:
+                raise
+
+        raise last_err  # unreachable, for type checker
 
     def build_from_processed_dir(
         self,
@@ -668,7 +713,40 @@ class LightRAGGraphBuilder:
 
         Logger.info(f"找到 {len(doc_dirs)} 个文档")
 
-        # ── 增量过滤：计算哈希，跳过未变化文档 ──
+        # ── 通知 RAG 读端：即将写入 workspace，请暂停读取 ──
+        working_dir = self._resolve_working_dir()
+        workspace_begin_write(Path(working_dir))
+        Logger.info("已放置 .writing 标记，RAG 读端应暂停读取")
+
+        try:
+            report = self._do_build(
+                processed_dir, manifest, doc_dirs, batch_timestamp, force_rebuild,
+            )
+        except Exception:
+            # 即使构建异常，也必须清理 .writing 标记，否则 RAG 读端永远阻塞
+            workspace_end_write(Path(working_dir), summary={"error": True})
+            Logger.warning("构建异常，已清理 .writing 标记")
+            raise
+
+        # ── 通知 RAG 读端：workspace 写入完成，可安全读取 ──
+        workspace_end_write(Path(working_dir), summary={
+            "built": report["built_documents"],
+            "skipped": report["skipped_documents"],
+            "batch_timestamp": batch_timestamp,
+        })
+        Logger.info("已写入 .ready 信号，RAG 读端可恢复读取")
+
+        return report
+
+    def _do_build(
+        self,
+        processed_dir: Path,
+        manifest: dict,
+        doc_dirs: list,
+        batch_timestamp: str,
+        force_rebuild: bool,
+    ) -> Dict[str, Any]:
+        """核心构建循环（由 build_from_processed_dir 在 .writing 保护下调用）"""
         all_chunks_data = []
         total_chunks = 0
         doc_results = []
@@ -682,10 +760,8 @@ class LightRAGGraphBuilder:
                 doc_results.append({"doc_name": doc_name, "chunks": 0, "success": False})
                 continue
 
-            # 计算当前内容哈希
             current_hash = self._content_hash(chunks)
 
-            # 增量判断：哈希未变 → 跳过
             prev = manifest.get(doc_name, {})
             if not force_rebuild and prev.get("hash") == current_hash:
                 skipped_count += 1
@@ -694,7 +770,6 @@ class LightRAGGraphBuilder:
                     "doc_name": doc_name, "chunks": len(chunks),
                     "success": True, "skipped": True,
                 })
-                # 仍然收集 chunk 数据用于 PG 导出
                 for chunk in chunks:
                     chunk["doc_name"] = doc_name
                     chunk["full_doc_id"] = doc_name
@@ -702,29 +777,26 @@ class LightRAGGraphBuilder:
                 total_chunks += len(chunks)
                 continue
 
-            # ── 需要构建 ──
             doc_text = "\n\n".join(c["content"] for c in chunks)
             Logger.info(f"  构建文档: {doc_name} ({len(chunks)} chunks, {len(doc_text)} 字符)")
 
             try:
-                # 使用稳定文档 ID（不含时间戳），让 LightRAG 能识别同一文档
                 loop = always_get_an_event_loop()
-                track_id = loop.run_until_complete(
-                    self.rag.ainsert(
-                    doc_text,
-                        ids=[doc_name],
-                    file_paths=[str(doc_dir)],
-                    )
+                insert_max_retries = self.config.get("performance", {}).get("insert_max_retries", 3)
+                insert_retry_delay = self.config.get("performance", {}).get("insert_retry_delay", 2.0)
+
+                track_id = self._insert_with_retry(
+                    loop, doc_text, doc_name, str(doc_dir),
+                    max_retries=insert_max_retries,
+                    retry_delay=insert_retry_delay,
                 )
                 Logger.success(f"    图谱构建成功 (track_id: {track_id})")
 
-                # 更新增量清单
                 manifest[doc_name] = {
                     "hash": current_hash,
                     "built_at": datetime.now().isoformat(),
                 }
 
-                # 记录 chunk 信息（用于后续导出到 PG）
                 for chunk in chunks:
                     chunk["doc_name"] = doc_name
                     chunk["full_doc_id"] = doc_name
@@ -754,7 +826,7 @@ class LightRAGGraphBuilder:
         )
         Logger.info(f"本次构建: {built_count} 个文档, 跳过: {skipped_count} 个（未变化）")
 
-        # ── 保存增量清单 ──
+        # ── 保存增量清单（原子写入） ──
         self._save_graph_manifest(processed_dir, manifest)
 
         # ---------- 导出到 PostgreSQL（二次备份） ----------
@@ -770,7 +842,6 @@ class LightRAGGraphBuilder:
                 exporter = PgGraphExporter(db_cfg, pg_export_cfg)
                 exporter.init_tables()
 
-                # 单事务原子导出：实体 + 关系 + chunks
                 perf_cfg = self.config.get("performance", {})
                 pg_result = exporter.export_all(
                     self.rag, all_chunks_data, batch_timestamp,
@@ -782,7 +853,6 @@ class LightRAGGraphBuilder:
         elif built_count == 0:
             Logger.info("无新文档需要构建，跳过 PostgreSQL 导出")
 
-        # 构建报告
         report = {
             "success": True,
             "batch_timestamp": batch_timestamp,

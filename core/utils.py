@@ -14,6 +14,8 @@ import os
 import sys
 import re
 import json
+import time
+import tempfile
 from pathlib import Path
 from datetime import datetime
 
@@ -212,3 +214,131 @@ def release_lock(lock_path: Path = None):
             lock_file.unlink()
     except OSError:
         pass
+
+
+# ==================== 原子文件写入 ====================
+
+def atomic_write_json(
+    filepath: Path,
+    data,
+    *,
+    max_retries: int = 3,
+    retry_delay: float = 0.5,
+    indent: int = 2,
+) -> None:
+    """
+    原子写入 JSON 文件：写临时文件 → os.replace() 原子替换。
+
+    保证：
+      - 写入过程中崩溃不会损坏原文件
+      - 读端永远看到完整的旧文件或完整的新文件，不会读到半写内容
+      - 失败自动重试（指数退避）
+
+    Args:
+        filepath: 目标文件路径
+        data: 要序列化的数据
+        max_retries: 最大重试次数
+        retry_delay: 首次重试延迟（秒），后续指数增长
+        indent: JSON 缩进
+    """
+    filepath = Path(filepath)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+
+    content = json.dumps(data, ensure_ascii=False, indent=indent)
+
+    last_err = None
+    for attempt in range(1, max_retries + 1):
+        fd = None
+        tmp_path = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                suffix=".tmp",
+                prefix=f".{filepath.stem}_",
+                dir=str(filepath.parent),
+            )
+            os.write(fd, content.encode("utf-8"))
+            os.fsync(fd)
+            os.close(fd)
+            fd = None
+
+            os.replace(tmp_path, str(filepath))
+            return
+        except Exception as e:
+            last_err = e
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            if attempt < max_retries:
+                delay = retry_delay * (2 ** (attempt - 1))
+                log.warning(
+                    f"atomic_write_json 失败 ({filepath.name}), "
+                    f"重试 {attempt}/{max_retries}, {delay:.1f}s 后: {e}"
+                )
+                time.sleep(delay)
+
+    log.error(f"atomic_write_json 最终失败 ({filepath.name}): {last_err}")
+    raise last_err
+
+
+# ==================== Workspace 读写协调信号 ====================
+
+_WRITING_MARKER = ".writing"
+_READY_MARKER = ".ready"
+
+
+def workspace_begin_write(workspace_dir: Path) -> None:
+    """
+    在 workspace 目录放置 .writing 标记，通知 RAG 读端暂停读取。
+
+    RAG 系统应在读取前检查此文件：存在则等待或跳过本次读取。
+    """
+    workspace_dir = Path(workspace_dir)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    marker = workspace_dir / _WRITING_MARKER
+    marker.write_text(
+        json.dumps({
+            "pid": os.getpid(),
+            "started_at": datetime.now().isoformat(),
+        }),
+        encoding="utf-8",
+    )
+
+    ready = workspace_dir / _READY_MARKER
+    if ready.exists():
+        try:
+            ready.unlink()
+        except OSError:
+            pass
+
+
+def workspace_end_write(workspace_dir: Path, summary: dict = None) -> None:
+    """
+    移除 .writing 标记，写入 .ready 信号文件（原子替换）。
+
+    .ready 内容包含构建时间戳和摘要，RAG 读端可据此判断是否需要重新加载。
+    """
+    workspace_dir = Path(workspace_dir)
+
+    writing = workspace_dir / _WRITING_MARKER
+    if writing.exists():
+        try:
+            writing.unlink()
+        except OSError:
+            pass
+
+    ready_data = {
+        "completed_at": datetime.now().isoformat(),
+        "pid": os.getpid(),
+    }
+    if summary:
+        ready_data["summary"] = summary
+
+    atomic_write_json(workspace_dir / _READY_MARKER, ready_data)

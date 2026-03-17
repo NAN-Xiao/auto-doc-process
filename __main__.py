@@ -45,7 +45,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .core.config import load_full_config, load_processor_config, log, setup_logging, ConfigError, MODULE_DIR
-from .core.utils import acquire_lock, release_lock
+from .core.utils import acquire_lock, release_lock, atomic_write_json
 
 
 # ==================== 阶段常量 ====================
@@ -638,9 +638,8 @@ def step_graph(reset_db: bool = False):
     )
 
     report_file = processed_dir / "lightrag_report.json"
-    with open(report_file, "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
-    log.info(f"图谱报告已保存: {report_file}")
+    atomic_write_json(report_file, report)
+    log.info(f"图谱报告已保存（原子写入）: {report_file}")
 
     return report
 
