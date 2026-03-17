@@ -24,7 +24,11 @@ import logging
 from datetime import datetime, timedelta
 
 # ─── 环境准备 ───────────────────────────────────────────────
-project_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 兼容编译部署：__pycache__/scheduler.cpython-3XX.pyc 比源码多一层目录
+_this_dir = os.path.dirname(os.path.abspath(__file__))
+if os.path.basename(_this_dir) == "__pycache__":
+    _this_dir = os.path.dirname(_this_dir)
+project_parent = os.path.dirname(_this_dir)
 os.chdir(project_parent)
 if project_parent not in sys.path:
     sys.path.insert(0, project_parent)

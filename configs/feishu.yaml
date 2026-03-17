@@ -34,14 +34,9 @@ feishu:
     path: ""                # 增量清单路径，空=默认
 
   schedule:
-<<<<<<< HEAD
     task_name: "TWDDoc"   # Windows 定时任务名称（多实例部署时请改为不同名称）
-    run_time: "02:00"
-    run_on_start: true
-=======
     run_time: "02:00"       # 定时运行时间
     run_on_start: true      # 启动时运行
->>>>>>> 507df40c5e9a638b6d10f325d1cd3ffb24c78823
 
   lock:
     path: ""                # 进程锁路径，空=默认

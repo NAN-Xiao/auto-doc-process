@@ -1,13 +1,10 @@
 # LightRAG 知识图谱配置
 
 lightrag:
-<<<<<<< HEAD
   # 图谱总开关（false = 跳过阶段4图谱构建）
   enabled: true
 
   # 工作目录（LightRAG 的缓存和中间数据，相对于 auto-doc-process/，与 processed 同级）
-=======
->>>>>>> 507df40c5e9a638b6d10f325d1cd3ffb24c78823
   working_dir: "../lightrag_workspace"
 
   llm:
@@ -39,12 +36,9 @@ lightrag:
     graph: "NetworkXStorage"
     doc_status: "JsonDocStatusStorage"
 
-<<<<<<< HEAD
   # -----------------------------------------
   # 性能调优（低配机器可减小，高配可增大）
   # -----------------------------------------
-=======
->>>>>>> 507df40c5e9a638b6d10f325d1cd3ffb24c78823
   performance:
     entity_embed_batch: 32
     max_crash_restarts: 5
@@ -55,17 +49,9 @@ lightrag:
   # 数据库连接复用 db_info.yml
   # -----------------------------------------
   pg_export:
-<<<<<<< HEAD
     enabled: false                       # 是否启用 PG 导出（本地文件已足够，doc_chunks 单独入库）
     entity_table: "lightrag_entities"    # 实体表名
     relation_table: "lightrag_relations" # 关系表名
     chunk_table: "lightrag_chunks"       # 文本块表名
-    # 是否导出实体的 embedding 向量
-=======
-    enabled: false
-    entity_table: "lightrag_entities"
-    relation_table: "lightrag_relations"
-    chunk_table: "lightrag_chunks"
->>>>>>> 507df40c5e9a638b6d10f325d1cd3ffb24c78823
     export_entity_embeddings: true
     vector_dim: 512
