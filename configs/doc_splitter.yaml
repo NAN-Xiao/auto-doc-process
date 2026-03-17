@@ -38,11 +38,12 @@
 # ===========================================
 
 # ===========================================
-# DeepSeek LLM 配置（图片智能命名等功能使用）
+# DeepSeek LLM 连接配置（图片智能命名、图谱构建等功能共用）
 # ===========================================
 deepseek:
   api_key: "sk-6bcfa69eced746968f1f2e7766ee7fcb"   # DeepSeek API Key（请替换为你的真实 Key）
-  default_model: "deepseek-chat"                    # 默认模型
+  api_base: "https://api.deepseek.com"             # API 地址
+  default_model: "deepseek-chat"                   # 默认模型
 
 doc_splitter:
   # 文本分割配置
@@ -64,14 +65,11 @@ doc_splitter:
   image_naming:
     use_llm: true         # 是否使用LLM智能命名（false=简单模式，true=AI模式）
     max_length: 18        # 图片名称最大长度（中文字符数，建议15-20，过长影响显示）
-    
-    llm:                  # LLM模式配置（仅use_llm=true时生效）
-      api_base: "https://api.deepseek.com"  # DeepSeek API地址
-      temperature: 0.7    # 生成创造性（0-1，越高越随机）
-      max_tokens: 100     # 最大token数（控制响应长度）
-      frequency_penalty: 0.3  # 频率惩罚（减少重复用词）
-      presence_penalty: 0.2   # 存在惩罚（鼓励话题多样性）
-    
+    # LLM 图片命名生成参数（让命名更自然）
+    temperature: 0.7      # 生成创造性（0-1，越高越随机）
+    max_tokens: 100       # 最大 token 数（控制响应长度）
+    frequency_penalty: 0.3  # 频率惩罚（减少重复用词）
+    presence_penalty: 0.2   # 存在惩罚（鼓励话题多样性）
     keywords:             # 简单模式关键词（从周围文本中提取）
       - "图"
       - "表"

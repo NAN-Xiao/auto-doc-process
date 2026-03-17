@@ -313,20 +313,18 @@ class DocumentSplitter:
                 api_key = deepseek_config.get('api_key', '')
                 model = deepseek_config.get('default_model', 'deepseek-chat')
                 
-                llm_config = image_naming_config.get('llm', {})
-                
                 if api_key:
                     import openai as _openai
                     self.llm = {
                         "client": _openai.OpenAI(
                             api_key=api_key,
-                            base_url=llm_config.get('api_base', 'https://api.deepseek.com'),
+                            base_url=deepseek_config.get('api_base', 'https://api.deepseek.com'),
                         ),
                         "model": model,
-                        "temperature": llm_config.get('temperature', 0.7),
-                        "max_tokens": llm_config.get('max_tokens', 100),
-                        "frequency_penalty": llm_config.get('frequency_penalty', 0.0),
-                        "presence_penalty": llm_config.get('presence_penalty', 0.0),
+                        "temperature": image_naming_config.get('temperature', 0.7),
+                        "max_tokens": image_naming_config.get('max_tokens', 100),
+                        "frequency_penalty": image_naming_config.get('frequency_penalty', 0.0),
+                        "presence_penalty": image_naming_config.get('presence_penalty', 0.0),
                         }
                     Logger.info(f"LLM智能命名已启用: {model}")
                 else:

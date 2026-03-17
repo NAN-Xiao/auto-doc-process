@@ -156,6 +156,7 @@ download  →  process  →  store  →  graph
 | 参数 | 默认 | 说明 |
 |------|------|------|
 | `export.poll_max_wait` | 300 | 导出任务最大等待（秒） |
+| `schedule.task_name` | FeishuDocSync | Windows 定时任务名称（多实例部署时改为不同名称） |
 | `schedule.run_time` | 02:00 | 定时任务执行时间 |
 
 ---
@@ -173,6 +174,19 @@ download  →  process  →  store  →  graph
 
 ---
 
+## 多实例部署
+
+如需为不同机器人/项目分别部署，可将整个部署目录复制多份，每份修改各自的配置：
+
+1. 复制整个部署根目录到不同位置
+2. 修改每份 `configs/feishu.yaml` 中的 `schedule.task_name` 为不同名称（如 `ProjectA_DocSync`、`ProjectB_DocSync`）
+3. 配置各自的飞书应用凭证（`app_id`/`app_secret`）、同步空间（`space_ids`）、数据库（`db_info.yml`）
+4. 在每个目录下分别执行 `deploy.bat install`
+
+> **注意**：不同实例建议使用不同数据库，避免数据冲突。
+
+---
+
 ## 常见问题
 
 | 问题 | 解决 |
@@ -187,5 +201,5 @@ download  →  process  →  store  →  graph
 | 某个文档处理崩溃 | 日志中搜 `子进程崩溃` 查看问题文档，其余文档不受影响 |
 | 清理所有数据重来 | `start.bat reset` 清理后 `start.bat --full` 重建 |
 | 机器重启后任务丢失 | 不会。`schtasks` 注册的任务持久化在系统中 |
-| 错过执行时间（如关机） | 任务计划程序 → FeishuDocSync → 属性 → 设置 → 勾选"过了计划时间立即启动" |
+| 错过执行时间（如关机） | 任务计划程序 → 找到对应任务名 → 属性 → 设置 → 勾选"过了计划时间立即启动" |
 

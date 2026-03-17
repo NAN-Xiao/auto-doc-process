@@ -49,6 +49,7 @@ feishu:
 
   # 定时任务
   schedule:
+    task_name: "TWDDoc"   # Windows 定时任务名称（多实例部署时请改为不同名称）
     run_time: "02:00"
     run_on_start: true
 

@@ -26,8 +26,9 @@ cd /d "%~dp0"
 set ABS_PYTHON=%CD%\venv\Scripts\python.exe
 set ABS_RUN_PY=%CD%\run.py
 
-:: 从 feishu.yaml 读取 run_time（覆盖默认值）
+:: 从 feishu.yaml 读取 task_name 和 run_time（覆盖默认值）
 if exist "configs\feishu.yaml" (
+    for /f "usebackq tokens=2" %%a in (`findstr /c:"task_name:" "configs\feishu.yaml"`) do set "TASK_NAME=%%~a"
     for /f "usebackq tokens=2" %%a in (`findstr /c:"run_time:" "configs\feishu.yaml"`) do set "RUN_TIME=%%~a"
 )
 
