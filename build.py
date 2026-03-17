@@ -269,144 +269,6 @@ def build(include_models: bool = False, include_venv: bool = False,
         shutil.move(str(readme_src), str(parent_dist / "README.md"))
         print("[生成] README.md（部署说明）")
 
-    # ── 外层 deploy.bat：转发到内部项目目录执行 ──
-    deploy_lines = [
-        '@echo off',
-        'chcp 65001 >nul',
-        'setlocal enabledelayedexpansion',
-        f'cd /d "%~dp0{proj_name}"',
-        '',
-        'set TASK_NAME=FeishuDocSync',
-        'set RUN_TIME=02:00',
-        'set ABS_PYTHON=%CD%\\venv\\Scripts\\python.exe',
-        'set ABS_RUN_PY=%CD%\\run.py',
-        '',
-        'if exist "configs\\feishu.yaml" (',
-        '    for /f "usebackq tokens=2" %%a in (`findstr /c:"task_name:" "configs\\feishu.yaml"`) do set "TASK_NAME=%%~a"',
-        '    for /f "usebackq tokens=2" %%a in (`findstr /c:"run_time:" "configs\\feishu.yaml"`) do set "RUN_TIME=%%~a"',
-        ')',
-        '',
-        'if not exist "venv\\Scripts\\python.exe" (',
-        '    echo [ERROR] venv not found. Run setup.bat first.',
-        '    pause & exit /b 1',
-        ')',
-        '',
-        'if "%~1"=="" goto :usage',
-        '',
-        ':: Admin check for commands that need schtasks',
-        'if /i "%~1"=="install" goto :check_admin',
-        'if /i "%~1"=="uninstall" goto :check_admin',
-        'if /i "%~1"=="stop" goto :check_admin',
-        'if /i "%~1"=="start" goto :check_admin',
-        'goto :skip_admin',
-        ':check_admin',
-        'net session >nul 2>&1',
-        'if %ERRORLEVEL% NEQ 0 (',
-        '    echo [FAIL] This command requires Administrator privileges.',
-        '    echo        Right-click CMD and select "Run as administrator".',
-        '    pause & exit /b 1',
-        ')',
-        ':skip_admin',
-        '',
-        'if /i "%~1"=="install" goto :install',
-        'if /i "%~1"=="uninstall" goto :uninstall',
-        'if /i "%~1"=="stop" goto :stop',
-        'if /i "%~1"=="start" goto :start_task',
-        'if /i "%~1"=="run" goto :run_now',
-        'if /i "%~1"=="status" goto :status',
-        'goto :usage',
-        '',
-        ':preflight',
-        'echo.',
-        'echo [Preflight] Checking environment...',
-        'set CHECK_FAIL=0',
-        'for %%f in (feishu.yaml db_info.yml doc_splitter.yaml) do (',
-        '    if not exist "configs\\%%f" (',
-        '        echo   [FAIL] Missing: configs\\%%f',
-        '        set CHECK_FAIL=1',
-        '    )',
-        ')',
-        'if "!CHECK_FAIL!"=="0" (',
-        '    "venv\\Scripts\\python.exe" "tools\\preflight_check.py" "configs"',
-        '    if errorlevel 1 set CHECK_FAIL=1',
-        ')',
-        'if "!CHECK_FAIL!"=="1" (',
-        '    echo [FAIL] Preflight failed. Fix errors above.',
-        '    goto :end',
-        ')',
-        'echo [Preflight] OK',
-        'goto :eof',
-        '',
-        ':install',
-        'call :preflight',
-        'if "!CHECK_FAIL!"=="1" goto :end',
-        'set NEED_INIT=0',
-        'if not exist "..\\processed" set NEED_INIT=1',
-        'if "!NEED_INIT!"=="0" (',
-        '    dir /b "..\\processed\\" 2>nul | findstr /r "." >nul 2>&1',
-        '    if errorlevel 1 set NEED_INIT=1',
-        ')',
-        'if "!NEED_INIT!"=="1" (',
-        '    echo [Init] First run - full sync...',
-        '    "venv\\Scripts\\python.exe" "run.py" --full',
-        ')',
-        'schtasks /Delete /TN "%TASK_NAME%" /F >nul 2>&1',
-        'schtasks /Create /TN "%TASK_NAME%" /TR "\\"%ABS_PYTHON%\\" \\"%ABS_RUN_PY%\\"" /SC DAILY /ST %RUN_TIME% /RL HIGHEST /F',
-        'if %ERRORLEVEL% EQU 0 (',
-        '    echo [OK] Task "%TASK_NAME%" registered, daily at %RUN_TIME%',
-        ') else (',
-        '    echo [FAIL] Run as Administrator',
-        ')',
-        'goto :end',
-        '',
-        ':stop',
-        'schtasks /Change /TN "%TASK_NAME%" /DISABLE >nul 2>&1',
-        'schtasks /End /TN "%TASK_NAME%" >nul 2>&1',
-        'taskkill /f /im python.exe >nul 2>&1',
-        'echo [OK] Stopped',
-        'goto :end',
-        '',
-        ':start_task',
-        'schtasks /Change /TN "%TASK_NAME%" /ENABLE >nul 2>&1',
-        'echo [OK] Task resumed',
-        'goto :end',
-        '',
-        ':run_now',
-        'call :preflight',
-        'if "!CHECK_FAIL!"=="1" goto :end',
-        '"venv\\Scripts\\python.exe" "run.py"',
-        'goto :end',
-        '',
-        ':uninstall',
-        'schtasks /End /TN "%TASK_NAME%" >nul 2>&1',
-        'schtasks /Delete /TN "%TASK_NAME%" /F',
-        'echo [OK] Task removed',
-        'goto :end',
-        '',
-        ':status',
-        'schtasks /Query /TN "%TASK_NAME%" /V /FO LIST 2>nul',
-        'if %ERRORLEVEL% NEQ 0 echo [INFO] Task not found. Run: deploy.bat install',
-        'goto :end',
-        '',
-        ':usage',
-        'echo.',
-        'echo   deploy.bat install     Register scheduled task',
-        'echo   deploy.bat stop        Stop task',
-        'echo   deploy.bat start       Resume task',
-        'echo   deploy.bat run         Run once now',
-        'echo   deploy.bat status      Show task status',
-        'echo   deploy.bat uninstall   Remove task',
-        'echo.',
-        '',
-        ':end',
-        'echo.',
-        'pause',
-        'endlocal',
-    ]
-    (parent_dist / "deploy.bat").write_bytes(
-        "\r\n".join(deploy_lines).encode("utf-8")
-    )
-
     # ── 外层 start.bat：精简转发 ──
     start_lines = [
         '@echo off',
@@ -599,7 +461,7 @@ def build(include_models: bool = False, include_venv: bool = False,
         "\r\n".join(uninstall_lines).encode("utf-8")
     )
 
-    print(f"[生成] 外层 install.bat / uninstall.bat / deploy.bat / start.bat（{parent_dist}）")
+    print(f"[生成] 外层 install.bat / uninstall.bat / start.bat（{parent_dist}）")
 
     # ─── 9. 统计 ─────────────────────────────────────────────
     total_size = sum(f.stat().st_size for f in dist_dir.rglob("*") if f.is_file())
@@ -628,12 +490,13 @@ def build(include_models: bool = False, include_venv: bool = False,
     print()
     print("  目录结构：")
     print(f"    目标目录/")
+    print(f"    ├── README.md               ← 部署说明")
     print(f"    ├── install.bat             ← 双击注册定时任务")
     print(f"    ├── uninstall.bat           ← 双击移除定时任务")
-    print(f"    ├── start.bat               ← 手动执行一次")
-    print(f"    ├── deploy.bat              ← 高级管理（install/stop/run/status）")
+    print(f"    ├── start.bat               ← 手动执行 / 运维")
     print(f"    └── {dist_dir.name}/")
     print(f"        ├── configs/            ← 配置文件")
+    print(f"        ├── setup.bat           ← 首次部署（创建 venv）")
     print(f"        ├── venv/               ← 虚拟环境")
     print(f"        └── run.py              ← 程序入口")
     if slim:

@@ -8,10 +8,10 @@
 
 ```
 部署根目录/
+├── README.md                   ← 本文件
 ├── install.bat                 ← 双击安装定时任务
 ├── uninstall.bat               ← 双击卸载定时任务
-├── start.bat                   ← 手动执行
-├── deploy.bat                  ← 高级管理
+├── start.bat                   ← 手动执行 / 运维
 │
 ├── _runtime/                   ← 运行时（日志/锁）
 ├── processed/                  ← 处理结果（chunks/embeddings）
@@ -109,17 +109,6 @@ start.bat status                     查看状态
 start.bat reset                      清理所有产物
 ```
 
-### deploy.bat — 高级管理（需管理员）
-
-```
-deploy.bat install       注册定时任务
-deploy.bat uninstall     删除定时任务
-deploy.bat run           立即触发一次
-deploy.bat stop          暂停定时 + 终止进程
-deploy.bat start         恢复定时
-deploy.bat status        查看任务状态
-```
-
 ---
 
 ## 处理管线
@@ -179,7 +168,7 @@ RAG 读端建议逻辑：检查 `.writing` → 存在则等待/跳过 → 不存
 |------|------|
 | `venv not found` | 进 `auto-doc-process/` 运行 `setup.bat` |
 | `Preflight failed` | 按提示检查配置和数据库连接 |
-| `Run as Administrator` | 右键以管理员运行，或用 `install.bat`（自动提权） |
+| `Run as Administrator` | `install.bat` / `uninstall.bat` 会自动弹 UAC 提权 |
 | 飞书权限不足 | 确认应用已开通 wiki/docx/drive 只读权限 |
 | 数据库连接失败 | 检查 PostgreSQL 服务 + `db_info.yml` |
 | `vector` 扩展缺失 | PG 中执行 `CREATE EXTENSION vector;` |
