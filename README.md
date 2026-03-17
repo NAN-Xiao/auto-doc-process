@@ -39,7 +39,7 @@
 |------|--------|
 | `feishu.yaml` | `app_id`、`app_secret`（飞书应用凭证） |
 | `db_info.yml` | `host`、`port`、`database`、`user`、`password` |
-| `doc_splitter.yaml` | `deepseek.api_key`（DeepSeek API Key） |
+| `doc_splitter.yaml` | `llm.api_key`（DeepSeek API Key） |
 
 示例：
 
@@ -58,7 +58,7 @@ database:
   password: "你的密码"
 
 # doc_splitter.yaml
-deepseek:
+llm:
   api_key: "sk-xxxxxxxxxxxxxxxx"
 ```
 
