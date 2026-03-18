@@ -4,8 +4,8 @@ lightrag:
   # 图谱总开关（false = 跳过阶段4图谱构建）
   enabled: true
 
-  # 工作目录（LightRAG 的缓存和中间数据，相对于 auto-doc-process/，与 processed 同级）
-  working_dir: "../lightrag_workspace"
+  # 工作目录（LightRAG 的缓存和中间数据，放在 processed/ 内）
+  working_dir: "../../processed/lightrag_workspace"
 
   llm:
     provider: "deepseek"

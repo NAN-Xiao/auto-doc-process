@@ -335,6 +335,7 @@ def workspace_end_write(workspace_dir: Path, summary: dict = None) -> None:
             pass
 
     ready_data = {
+        "status": "ready",
         "completed_at": datetime.now().isoformat(),
         "pid": os.getpid(),
     }

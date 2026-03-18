@@ -38,10 +38,16 @@ class ExcelMetadataExtractor:
         # 从配置读取 Excel 目录
         self.excel_source_dir = Path(paths_config.get('excel_dir', './excel'))
         
-        # 输出目录：documents/processed/excel/
-        documents_dir = Path(paths_config.get('documents_dir', './documents'))
-        processed_subdir = paths_config.get('processed_subdir', 'processed')
-        self.output_dir = documents_dir / processed_subdir / 'excel'
+        # 输出目录：processed/excel/
+        processed_dir_raw = paths_config.get('processed_dir', '')
+        if processed_dir_raw:
+            from ...core.config import MODULE_DIR
+            p = Path(processed_dir_raw)
+            processed_base = p if p.is_absolute() else (MODULE_DIR / p).resolve()
+        else:
+            documents_dir = Path(paths_config.get('documents_dir', './documents'))
+            processed_base = documents_dir / paths_config.get('processed_subdir', 'processed')
+        self.output_dir = processed_base / 'excel'
         
         self.output_dir.mkdir(parents=True, exist_ok=True)
     

@@ -64,9 +64,9 @@ doc_splitter:
     continue_on_error: true       # true=出错继续
 
 paths:
-  documents_dir: "../"            # 源文档目录
-  processed_subdir: "processed"   # 输出子目录
-  excel_dir: "../excel"           # Excel目录
+  documents_dir: "../../documents"          # 源文档目录（飞书下载位置）
+  processed_dir: "../../processed"          # 处理产物目录（chunks/embeddings）
+  excel_dir: "../../documents/excel"        # Excel 目录
 
 embedding:
   model: "BAAI/bge-small-zh-v1.5"

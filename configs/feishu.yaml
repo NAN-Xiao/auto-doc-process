@@ -5,7 +5,7 @@ feishu:
   app_secret: "B5s9jSpZOjQTEiVGckuc2b0geUJyrGFr"
   base_url: "https://open.feishu.cn"
 
-  output_dir: "../"         # 下载目录（相对路径）
+  output_dir: "../../documents"  # 下载目录（相对于 auto-doc-process/，到根目录）
 
   space_ids: []             # 同步空间ID，空=全部
 

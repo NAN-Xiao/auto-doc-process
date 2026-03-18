@@ -971,17 +971,25 @@ def _do_reset(config: dict):
 
 
 def _resolve_processed_dir() -> Path:
-    """获取 processed 目录路径"""
+    """获取 processed 目录路径（独立于文档目录）"""
     from .core.config import MODULE_DIR
     proc_config = load_processor_config()
     paths = proc_config.get("paths", {})
+
+    # 优先使用独立的 processed_dir（新配置）
+    processed_dir = paths.get("processed_dir", "")
+    if processed_dir:
+        p = Path(processed_dir)
+        if not p.is_absolute():
+            p = (MODULE_DIR / p).resolve()
+        return p
+
+    # 向后兼容：documents_dir + processed_subdir（旧配置）
     documents_dir = paths.get("documents_dir", "../")
     processed_subdir = paths.get("processed_subdir", "processed")
-
     docs_path = Path(documents_dir)
     if not docs_path.is_absolute():
         docs_path = (MODULE_DIR / docs_path).resolve()
-
     return docs_path / processed_subdir
 
 

@@ -96,8 +96,8 @@ def load_lightrag_config() -> dict:
 
     # 路径配置
     paths = proc_cfg.get("paths", {})
-    lightrag_cfg["documents_dir"] = paths.get("documents_dir", "./")
-    lightrag_cfg["processed_subdir"] = paths.get("processed_subdir", "processed")
+    lightrag_cfg["documents_dir"] = paths.get("documents_dir", "../documents")
+    lightrag_cfg["processed_dir"] = paths.get("processed_dir", "../processed")
 
     return lightrag_cfg
 

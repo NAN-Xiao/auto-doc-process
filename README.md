@@ -1,84 +1,147 @@
 # 飞书文档自动同步工具
 
-飞书知识空间 → 下载 → 拆分 → 向量化 → pgvector 入库 + LightRAG 知识图谱
 
----
-
-## 目录结构
-
-```
-部署根目录/
-├── README.md                   ← 本文件
-├── install.bat                 ← 双击安装定时任务
-├── uninstall.bat               ← 双击卸载定时任务
-├── start.bat                   ← 手动执行 / 运维
-│
-├── _runtime/                   ← 运行时（日志/锁）
-├── processed/                  ← 处理结果（chunks/embeddings）
-├── lightrag_workspace/         ← 图谱数据（实体/关系）
-│   ├── .writing                ← 写入中标记（存在时勿读取）
-│   └── .ready                  ← 写入完成信号
-├── *.docx                      ← 下载的原始文档
-│
-└── auto-doc-process/           ← 程序目录
-    ├── configs/                ← 配置文件 ★
-    ├── models/                 ← Embedding 模型
-    ├── venv/                   ← Python 环境
-    ├── run.py                  ← 程序入口
-    └── setup.bat               ← 首次部署
-```
-
----
 
 ## 快速部署（3 步）
 
 ### 1. 环境准备
 
-进入 `auto-doc-process/`，双击 **`setup.bat`**（自动创建 venv + 安装依赖）。
+进入 `dist/auto-doc-process/`，双击 **`setup.bat`**（自动创建 venv + 安装依赖）。
 
-> 如果是 `--include-venv` 打包的版本，跳过此步。
+> `--include-venv` 打包的版本跳过此步。
 
 ### 2. 填写配置
 
-进入 `auto-doc-process/configs/`，把 4 个 `.example` 文件各复制一份去掉后缀：
+进入 `dist/auto-doc-process/configs/`，把 4 个 `.example` 复制一份去掉后缀，按下方说明填写。
 
-| 复制为 | 必填项 | 获取方式 |
-|--------|--------|----------|
-| `feishu.yaml` | `app_id`、`app_secret` | [飞书开放平台](https://open.feishu.cn) → 自建应用 → 凭证 |
-| `db_info.yml` | `database`、`password` | PostgreSQL 14+，需 pgvector 扩展 |
-| `doc_splitter.yaml` | `llm.api_key`、`llm.api_base` | 默认 DeepSeek，可换任何 OpenAI 兼容 API |
-| `lightrag.yaml` | 一般无需改 | 默认即可，可关闭图谱 `enabled: false` |
+---
 
-最小配置示例：
+#### feishu.yaml — 飞书连接
+
+> 获取方式：[飞书开放平台](https://open.feishu.cn) → 创建企业自建应用 → 凭证与基础信息
+>
+> 需开通权限：`wiki:wiki:readonly`、`docx:document:readonly`、`drive:drive:readonly`
 
 ```yaml
-# feishu.yaml
 feishu:
-  app_id: "cli_xxxxxxxx"
-  app_secret: "xxxxxxxxxxxxxxxx"
+  app_id: ""                    # ★ 必填 - 飞书 App ID
+  app_secret: ""                # ★ 必填 - 飞书 App Secret
+  base_url: "https://open.feishu.cn"
 
-# db_info.yml
-database:
-  host: localhost
-  port: 5432
-  database: myRAG
-  user: postgres
-  password: "你的密码"
+  output_dir: "../../documents" # 文档下载目录（相对于 auto-doc-process/）
 
-# doc_splitter.yaml — LLM 配置（图片命名、图谱构建共用）
-llm:
-  api_key: "sk-xxxxxxxxxxxxxxxx"
-  api_base: "https://api.deepseek.com"    # 默认 DeepSeek，换其他 LLM 改这里
-  model: "deepseek-chat"                  # 模型名
+  space_ids: []                 # 同步哪些空间，空=所有有权限的空间
+  # space_ids:
+  #   - "7613735903789370589"   # 指定空间 ID
+
+  log:
+    level: "INFO"               # 日志级别：DEBUG / INFO / WARNING / ERROR
+
+  export:
+    poll_max_wait: 300          # 导出任务最大等待（秒）
+    poll_interval: 3            # 轮询间隔（秒）
+    type_format_map:            # 文档类型 → 导出格式
+      doc: "docx"
+      docx: "docx"
+      # sheet: "xlsx"           # 取消注释可导出表格
+      # bitable: "xlsx"
+    skip_types: ["mindnote", "file", "slides", "catalog"]
+
+  schedule:
+    task_name: "FeishuDocSync"  # 定时任务名（多实例部署须不同）
+    run_time: "02:00"           # 每天执行时间
+    run_on_start: true          # 安装后立即执行一次
 ```
 
-> 飞书应用需开通权限：`wiki:wiki:readonly`、`docx:document:readonly`、`drive:drive:readonly`
+---
+
+#### db_info.yml — 数据库连接
+
+> 要求：PostgreSQL 14+，已安装 pgvector 扩展
+
+```yaml
+database:
+  enabled: true                 # false = 禁用数据库（仅本地文件处理）
+  host: localhost               # 数据库地址
+  port: 5432                    # 端口
+  database: ""                  # ★ 必填 - 数据库名
+  user: postgres                # 用户名
+  password: ""                  # ★ 必填 - 密码
+```
+
+---
+
+#### doc_splitter.yaml — 文档处理 + LLM
+
+```yaml
+# ── LLM 配置（图片命名、图谱构建共用） ──
+llm:
+  api_key: ""                             # ★ 必填 - API Key
+  api_base: "https://api.deepseek.com"    # ★ 必填 - API 地址（默认 DeepSeek，可换 OpenAI 兼容接口）
+  model: "deepseek-chat"                  # 模型名
+
+# ── 文本分割 ──
+doc_splitter:
+  text_splitter:
+    chunk_size: 1000            # 文本块大小（字符），影响 RAG 检索粒度
+    chunk_overlap: 200          # 块间重叠（字符），保证上下文连贯
+
+  image_naming:
+    use_llm: true               # true=LLM 智能命名, false=关键词简单命名
+
+  processing:
+    skip_existing: false        # true=跳过已处理的文档
+    continue_on_error: true     # true=单文档出错不中断整体
+
+# ── 路径配置（相对于 auto-doc-process/，../../ = 根目录） ──
+paths:
+  documents_dir: "../../documents"        # 源文档目录（与 feishu.yaml output_dir 一致）
+  processed_dir: "../../processed"        # 处理产物目录
+  excel_dir: "../../documents/excel"      # Excel 目录
+
+# ── Embedding 模型 ──
+embedding:
+  model: "BAAI/bge-small-zh-v1.5"        # 模型名（本地优先，无则自动下载）
+  batch_size: 16                          # 批次大小（OOM 调小）
+  huggingface:
+    cache_folder: "./models"              # 模型缓存目录
+    device: "cpu"                         # cpu / cuda
+```
+
+---
+
+#### lightrag.yaml — 知识图谱
+
+> 一般无需修改，默认值即可。不需要图谱可设 `enabled: false`。
+
+```yaml
+lightrag:
+  enabled: true                           # 图谱总开关（false=跳过阶段4）
+  working_dir: "../../processed/lightrag_workspace"  # 图谱工作目录
+
+  llm:
+    model: "deepseek-chat"                # 图谱抽取用的模型
+    max_async: 12                         # LLM 并发数（仅网络）
+    timeout: 180                          # 单次请求超时（秒）
+
+  graph:
+    chunk_token_size: 1500                # 图谱分块大小（token）
+    max_parallel_insert: 4                # 文档并行插入数（低配调小）
+    enable_llm_cache: true                # LLM 结果缓存
+
+  performance:
+    entity_embed_batch: 32                # 实体 embedding 批次（OOM 调小）
+    max_crash_restarts: 5                 # 子进程崩溃最大重启次数
+
+  pg_export:
+    enabled: false                        # PG 导出（默认关闭，本地文件已足够）
+```
 
 ### 3. 安装定时任务
 
-回到**部署根目录**，双击 **`install.bat`**（自动请求管理员权限）。
+进入 **`dist/`** 目录，双击 **`install.bat`**（自动弹 UAC 提权）。
 
-首次会自动：预检环境 → 全量同步一次 → 注册每天定时任务。
+首次会自动：预检环境 → 全量同步 → 注册每天定时任务。
 
 卸载：双击 **`uninstall.bat`**。
 
@@ -86,7 +149,9 @@ llm:
 
 ## 命令速查
 
-### start.bat — 手动执行
+> 在 `dist/` 目录下执行。PowerShell 中需加 `.\` 前缀，如 `.\start.bat status`
+
+### 手动执行
 
 ```
 start.bat                            全流程（下载→处理→入库→图谱）
@@ -101,7 +166,7 @@ start.bat --dry-run                  预览模式（不执行）
 start.bat --no-graph                 跳过图谱构建
 ```
 
-### start.bat — 运维
+### 运维
 
 ```
 start.bat stop                       停止进程
@@ -124,17 +189,30 @@ download  →  process  →  store  →  graph
 
 ---
 
+## 路径配置
+
+所有路径相对于 `dist/auto-doc-process/`，`../../` 即根目录：
+
+| 配置文件 | 参数 | 默认值 | 指向 |
+|----------|------|--------|------|
+| `feishu.yaml` | `output_dir` | `../../documents` | 文档下载目录 |
+| `doc_splitter.yaml` | `paths.documents_dir` | `../../documents` | 源文档目录（同上） |
+| `doc_splitter.yaml` | `paths.processed_dir` | `../../processed` | 处理产物目录 |
+| `lightrag.yaml` | `working_dir` | `../../processed/lightrag_workspace` | 图谱工作目录 |
+
+> `output_dir` 和 `documents_dir` 须指向同一目录。
+
+---
+
 ## 图谱读写协调
 
-构建图谱时会在 `lightrag_workspace/` 目录产生信号文件，供外部 RAG 系统协调读取：
+构建图谱时在 `lightrag_workspace/` 产生信号文件，供外部 RAG 系统协调：
 
 | 文件 | 含义 |
 |------|------|
 | `.writing` 存在 | **正在写入，请勿读取**（数据不完整） |
 | `.ready` 存在 | 写入完成，可安全读取（内含时间戳） |
 | 两者都不存在 | 无数据或尚未构建 |
-
-RAG 读端建议逻辑：检查 `.writing` → 存在则等待/跳过 → 不存在则读取 `.ready` 判断是否需要刷新。
 
 ---
 
@@ -153,7 +231,7 @@ RAG 读端建议逻辑：检查 `.writing` → 存在则等待/跳过 → 不存
 
 ## 多实例部署
 
-复制整个部署目录到不同位置，每份改：
+复制整个根目录到不同位置，每份改：
 
 1. `feishu.yaml` → `schedule.task_name` 改为不同名称
 2. `feishu.yaml` → `app_id`/`app_secret`/`space_ids` 配各自应用
@@ -166,7 +244,7 @@ RAG 读端建议逻辑：检查 `.writing` → 存在则等待/跳过 → 不存
 
 | 问题 | 解决 |
 |------|------|
-| `venv not found` | 进 `auto-doc-process/` 运行 `setup.bat` |
+| `venv not found` | 进 `dist/auto-doc-process/` 运行 `setup.bat` |
 | `Preflight failed` | 按提示检查配置和数据库连接 |
 | `Run as Administrator` | `install.bat` / `uninstall.bat` 会自动弹 UAC 提权 |
 | 飞书权限不足 | 确认应用已开通 wiki/docx/drive 只读权限 |

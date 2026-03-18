@@ -16,6 +16,8 @@ def check_db(configs_dir: str) -> int:
     import psycopg
 
     db_info_path = os.path.join(configs_dir, "db_info.yml")
+    abs_path = os.path.abspath(db_info_path)
+    print(f"  [DB] 读取配置: {abs_path}")
     with open(db_info_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f).get("database", {})
 

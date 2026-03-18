@@ -87,10 +87,17 @@ if __name__ == "__main__":
     # 从配置文件读取路径
     config = load_config()
     paths_config = config.get('paths', {})
-    documents_dir = Path(paths_config.get('documents_dir', './documents'))
-    processed_subdir = paths_config.get('processed_subdir', 'processed')
 
-    excel_metadata_dir = documents_dir / processed_subdir / "excel"
+    processed_dir_raw = paths_config.get('processed_dir', '')
+    if processed_dir_raw:
+        from ...core.config import MODULE_DIR
+        p = Path(processed_dir_raw)
+        processed_base = p if p.is_absolute() else (MODULE_DIR / p).resolve()
+    else:
+        documents_dir = Path(paths_config.get('documents_dir', './documents'))
+        processed_base = documents_dir / paths_config.get('processed_subdir', 'processed')
+
+    excel_metadata_dir = processed_base / "excel"
 
     Logger.info(f"Excel 元数据目录: {excel_metadata_dir}")
     count_tokens(str(excel_metadata_dir))

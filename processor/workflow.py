@@ -41,15 +41,23 @@ class BatchWorkflow:
         
         paths_config = self.config.get('paths', {})
         self.documents_dir = Path(paths_config.get('documents_dir', './documents'))
-        self.processed_subdir = paths_config.get('processed_subdir', 'processed')
-        
+
+        # 优先使用独立的 processed_dir，向后兼容 processed_subdir
+        processed_dir_raw = paths_config.get('processed_dir', '')
+        if processed_dir_raw:
+            from ..core.config import MODULE_DIR
+            p = Path(processed_dir_raw)
+            self.processed_dir = p if p.is_absolute() else (MODULE_DIR / p).resolve()
+        else:
+            self.processed_dir = self.documents_dir / paths_config.get('processed_subdir', 'processed')
+
         doc_config = self.config.get('doc_splitter', {})
         self.supported_formats = doc_config.get('supported_formats', ['.pdf', '.docx'])
         
         Logger.separator()
         Logger.info("批量处理工具已初始化")
         Logger.info(f"文档目录: {self.documents_dir}", indent=1)
-        Logger.info(f"输出子目录: {self.processed_subdir}", indent=1)
+        Logger.info(f"处理目录: {self.processed_dir}", indent=1)
         Logger.info(f"支持格式: {', '.join(self.supported_formats)}", indent=1)
         Logger.info(f"LLM 命名: {'启用' if self.use_llm_naming else '禁用'}", indent=1)
         Logger.separator()
@@ -102,8 +110,8 @@ class BatchWorkflow:
         try:
             Logger.info("步骤1：拆分文档...")
 
-            # 扁平目录结构: processed/{doc_name}/（不含时间戳层）
-            output_path = generate_output_path(doc_path)
+            # 输出到独立的 processed_dir/{doc_name}/
+            output_path = self.processed_dir / safe_filename(doc_path.stem, doc_path.stem)
 
             doc_info = process_document(
                 input_path=doc_path,
@@ -400,12 +408,12 @@ class BatchWorkflow:
             'processed_at': datetime.now().isoformat(),
             'use_llm_naming': self.use_llm_naming,
             'documents_dir': str(self.documents_dir),
-            'processed_subdir': self.processed_subdir,
+            'processed_dir': str(self.processed_dir),
             'documents': results
         }
-        
+
         # 报告保存到 processed/ 根目录
-        report_dir = self.documents_dir / self.processed_subdir
+        report_dir = self.processed_dir
         report_dir.mkdir(parents=True, exist_ok=True)
         report_file = report_dir / "batch_report.json"
         with open(report_file, 'w', encoding='utf-8') as f:

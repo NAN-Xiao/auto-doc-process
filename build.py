@@ -6,7 +6,7 @@
 用法（在 auto-doc-process 目录下执行）：
   venv\\Scripts\\python.exe build.py                          # 基础打包
   venv\\Scripts\\python.exe build.py --slim                   # 轻量部署（ONNX 模型 + 精简依赖）
-  venv\\Scripts\\python.exe build.py --include-models         # 包含 Embedding 模型（约 100MB）
+  venv\\Scripts\\python.exe build.py --no-models              # 不包含 Embedding 模型（目标机首次运行自动下载）
   venv\\Scripts\\python.exe build.py --include-venv           # 包含虚拟环境（约 1-2GB，目标机无需再装）
 
 输出：
@@ -55,8 +55,8 @@ def _force_rmtree(path: Path):
             )
 
 
-def build(include_models: bool = False, include_venv: bool = False,
-          slim: bool = False):
+def build(include_models: bool = True, include_venv: bool = False,
+          slim: bool = False, keep_configs: bool = False):
     src_dir = Path(__file__).parent.resolve()
     dist_root = src_dir.parent / "dist"
     dist_dir = dist_root / "auto-doc-process"
@@ -76,13 +76,29 @@ def build(include_models: bool = False, include_venv: bool = False,
     print(f"  模式:       {'轻量 (ONNX + 精简依赖)' if slim else '完整 (torch)'}")
     print(f"  包含模型:   {'是' if include_models else '否'}")
     print(f"  包含 venv:  {'是' if include_venv else '否'}")
+    print(f"  保留配置:   {'是' if keep_configs else '否（构建后需手动填写 configs/）'}")
     print("=" * 60)
     print()
 
     # ─── 1. 清理旧构建 ───────────────────────────────────────
+    import time as _build_time
+    for attempt in range(3):
+        if dist_dir.exists():
+            _force_rmtree(dist_dir)
+            _build_time.sleep(0.5)  # Windows 文件句柄释放延迟
+        if not dist_dir.exists():
+            break
+        if attempt < 2:
+            print("[清理] 删除失败，可能被占用，2 秒后重试...")
+            _build_time.sleep(2)
+        else:
+            raise SystemExit(
+                f"[错误] 无法删除 {dist_dir}\n"
+                "请关闭占用该目录的程序（资源管理器、IDE、杀毒软件等）后重试。"
+            )
     if dist_dir.exists():
-        _force_rmtree(dist_dir)
-        print("[清理] 已删除旧构建目录")
+        raise SystemExit(f"[错误] 无法删除旧构建目录: {dist_dir}")
+    print("[清理] 已删除旧构建目录")
 
     # ─── 2. 复制项目到 dist ──────────────────────────────────
     ignore_list = [
@@ -124,13 +140,25 @@ def build(include_models: bool = False, include_venv: bool = False,
         else:
             print("[警告] ONNX 模型不存在 (models/onnx/)，请先运行 tools/export_onnx.py")
 
-    # ─── 3. 删除敏感配置（只保留 .example 模板） ─────────────
+    # ─── 3. 处理配置（生成 .example，可选删除敏感配置） ────────
+    # --keep-configs 时跳过删除，保留源码中的配置（便于与 slg-config 等共用）
     configs_dir = dist_dir / "configs"
-    for sensitive in ("feishu.yaml", "db_info.yml", "doc_splitter.yaml", "lightrag.yaml"):
-        f = configs_dir / sensitive
-        if f.exists():
-            f.unlink()
-            print(f"[安全] 删除敏感配置: {sensitive}")
+    sensitive_configs = ("feishu.yaml", "db_info.yml", "doc_splitter.yaml", "lightrag.yaml")
+    for sensitive in sensitive_configs:
+        src_cfg = configs_dir / sensitive
+        example_cfg = configs_dir / f"{sensitive}.example"
+        if src_cfg.exists() and not example_cfg.exists():
+            shutil.copy2(src_cfg, example_cfg)
+            print(f"[配置] 生成模板: {example_cfg.name}")
+
+    if not keep_configs:
+        for sensitive in sensitive_configs:
+            f = configs_dir / sensitive
+            if f.exists():
+                f.unlink()
+                print(f"[安全] 删除敏感配置: {sensitive}")
+    else:
+        print("[配置] 保留 configs/ 中的敏感配置（--keep-configs）")
 
     # ─── 3.5 移除内部不需要发布的脚本 ──────────────────────
     for name in ("invoke.py",):
@@ -213,20 +241,38 @@ def build(include_models: bool = False, include_venv: bool = False,
         '\n'
         'cd /d "%~dp0"\n'
         '\n'
+        'set REUSE_DEPS=0\n'
+        'if exist "venv\\Scripts\\python.exe" (\n'
+        '    echo [1/4] 检测到已存在的 venv，将重建以修复路径（复用已有依赖）...\n'
+        '    if exist "venv_old" rmdir /S /Q venv_old\n'
+        '    ren venv venv_old\n'
+        '    set REUSE_DEPS=1\n'
+        ') else (\n'
+        '    echo [1/4] 创建虚拟环境...\n'
+        ')\n'
+        '\n'
         'if not exist "venv\\Scripts\\python.exe" (\n'
-        '    echo [1/3] 创建虚拟环境...\n'
         '    python -m venv venv\n'
         '    if errorlevel 1 (\n'
         '        echo [错误] 创建虚拟环境失败，请确认已安装 Python ' + py_ver + '\n'
         '        pause\n'
         '        exit /b 1\n'
         '    )\n'
-        ') else (\n'
-        '    echo [1/3] 虚拟环境已存在，跳过\n'
         ')\n'
         '\n'
-        'echo [2/3] 安装依赖...\n'
-        'venv\\Scripts\\pip install -r ' + req_file + '\n'
+        'if "%REUSE_DEPS%"=="1" (\n'
+        '    echo [2/4] 复用已安装的依赖（复制 site-packages）...\n'
+        '    if exist "venv_old\\Lib\\site-packages" (\n'
+        '        xcopy /E /I /Y /Q "venv_old\\Lib\\site-packages\\*" "venv\\Lib\\site-packages\\" >nul\n'
+        '    )\n'
+        '    echo [3/4] 清理临时目录...\n'
+        '    rmdir /S /Q venv_old\n'
+        '    echo [4/4] 校验依赖...\n'
+        ') else (\n'
+        '    echo [2/4] 安装依赖...\n'
+        ')\n'
+        '\n'
+        'venv\\Scripts\\python.exe -m pip install -r ' + req_file + '\n'
         'if errorlevel 1 (\n'
         '    echo [错误] 依赖安装失败\n'
         '    pause\n'
@@ -234,7 +280,7 @@ def build(include_models: bool = False, include_venv: bool = False,
         ')\n'
         '\n'
         'echo.\n'
-        'echo [3/3] 请配置以下文件：\n'
+        'echo [完成] 请配置以下文件：\n'
         'echo   configs\\feishu.yaml.example        -^>  feishu.yaml\n'
         'echo   configs\\db_info.yml.example       -^>  db_info.yml\n'
         'echo   configs\\doc_splitter.yaml.example -^>  doc_splitter.yaml\n'
@@ -246,7 +292,7 @@ def build(include_models: bool = False, include_venv: bool = False,
         'echo.\n'
         'echo 部署完成后运行:\n'
         'echo   start.bat                双击手动执行\n'
-        'echo   deploy.bat install       注册 Windows 定时任务\n'
+        'echo   install.bat              注册 Windows 定时任务\n'
         'echo.\n'
         'pause\n',
         encoding="utf-8",
@@ -263,12 +309,6 @@ def build(include_models: bool = False, include_venv: bool = False,
         if p.exists():
             p.unlink()
 
-    # README 移到外层（部署者第一眼看到）
-    readme_src = dist_dir / "README.md"
-    if readme_src.exists():
-        shutil.move(str(readme_src), str(parent_dist / "README.md"))
-        print("[生成] README.md（部署说明）")
-
     # ── 外层 start.bat：精简转发 ──
     start_lines = [
         '@echo off',
@@ -276,9 +316,16 @@ def build(include_models: bool = False, include_venv: bool = False,
         'title FeishuDocSync',
         'cd /d "%~dp0"',
         '',
+        ':: 运维命令（不传给 run.py）',
         'if /i "%~1"=="stop" goto :do_stop',
         'if /i "%~1"=="status" goto :do_status',
         'if /i "%~1"=="reset" goto :do_reset',
+        '',
+        ':: 参数校验：非空且不以 -- 开头 → 无效命令',
+        'if not "%~1"=="" (',
+        '    echo %~1 | findstr /b /c:"--" >nul',
+        '    if errorlevel 1 goto :usage',
+        ')',
         '',
         f'if not exist "{proj_name}\\venv\\Scripts\\python.exe" (',
         f'    echo [ERROR] venv not found. Run {proj_name}\\setup.bat first.',
@@ -311,6 +358,24 @@ def build(include_models: bool = False, include_venv: bool = False,
         f'"{proj_name}\\venv\\Scripts\\python.exe" "{proj_name}\\run.py" --reset',
         'echo [OK] Reset complete',
         'exit /b 0',
+        '',
+        ':usage',
+        'echo.',
+        'echo  start.bat                        Run full pipeline',
+        'echo  start.bat --step download         Download only',
+        'echo  start.bat --step process          Process only',
+        'echo  start.bat --step store            Store only',
+        'echo  start.bat --step graph            Build graph only',
+        'echo  start.bat --full                  Full sync (ignore incremental)',
+        'echo  start.bat --reset-db              Reset DB and rebuild',
+        'echo  start.bat --dry-run               Preview mode',
+        'echo  start.bat --no-graph              Skip graph building',
+        'echo.',
+        'echo  start.bat stop                    Stop processes',
+        'echo  start.bat status                  Show status',
+        'echo  start.bat reset                   Clean all artifacts',
+        'echo.',
+        'exit /b 1',
     ]
     (parent_dist / "start.bat").write_bytes(
         "\r\n".join(start_lines).encode("utf-8")
@@ -371,9 +436,9 @@ def build(include_models: bool = False, include_venv: bool = False,
         '',
         ':: ── 首次全量同步（若无历史数据） ──',
         'set NEED_INIT=0',
-        'if not exist "..\\processed" set NEED_INIT=1',
+        'if not exist "..\\..\\processed" set NEED_INIT=1',
         'if "!NEED_INIT!"=="0" (',
-        '    dir /b "..\\processed\\" 2>nul | findstr /r "." >nul 2>&1',
+        '    dir /b "..\\..\\processed\\" 2>nul | findstr /r "." >nul 2>&1',
         '    if errorlevel 1 set NEED_INIT=1',
         ')',
         'if "!NEED_INIT!"=="1" (',
@@ -479,26 +544,27 @@ def build(include_models: bool = False, include_venv: bool = False,
     print(f"  Python:    {py_ver}（目标机须一致）")
     print()
     print("  部署到目标电脑：")
-    print(f"    1. 复制 dist/ 整个目录到目标位置")
+    print(f"    1. 在目标位置创建一个根目录，将 {dist_root.name}/ 放入其中")
     if not include_venv:
-        print(f"    2. 进入 {dist_dir.name}/ 双击 setup.bat 创建虚拟环境")
-        print(f"    3. 配置 {dist_dir.name}/configs/ 下的配置文件")
-        print(f"    4. 双击 install.bat 注册定时任务（自动请求管理员权限）")
+        print(f"    2. 进入 {dist_root.name}/{dist_dir.name}/ 双击 setup.bat 创建虚拟环境")
+        print(f"    3. 配置 {dist_root.name}/{dist_dir.name}/configs/ 下的配置文件")
+        print(f"    4. 进入 {dist_root.name}/ 双击 install.bat 注册定时任务")
     else:
-        print(f"    2. 配置 {dist_dir.name}/configs/ 下的配置文件")
-        print(f"    3. 双击 install.bat 注册定时任务（自动请求管理员权限）")
+        print(f"    2. 配置 {dist_root.name}/{dist_dir.name}/configs/ 下的配置文件")
+        print(f"    3. 进入 {dist_root.name}/ 双击 install.bat 注册定时任务")
     print()
     print("  目录结构：")
-    print(f"    目标目录/")
-    print(f"    ├── README.md               ← 部署说明")
-    print(f"    ├── install.bat             ← 双击注册定时任务")
-    print(f"    ├── uninstall.bat           ← 双击移除定时任务")
-    print(f"    ├── start.bat               ← 手动执行 / 运维")
-    print(f"    └── {dist_dir.name}/")
-    print(f"        ├── configs/            ← 配置文件")
-    print(f"        ├── setup.bat           ← 首次部署（创建 venv）")
-    print(f"        ├── venv/               ← 虚拟环境")
-    print(f"        └── run.py              ← 程序入口")
+    print(f"    根目录/")
+    print(f"    ├── {dist_root.name}/                   ← 程序打包目录")
+    print(f"    │   ├── install.bat             ← 双击注册定时任务")
+    print(f"    │   ├── uninstall.bat           ← 双击移除定时任务")
+    print(f"    │   ├── start.bat               ← 手动执行 / 运维")
+    print(f"    │   └── {dist_dir.name}/")
+    print(f"    │       ├── configs/            ← 配置文件")
+    print(f"    │       ├── setup.bat           ← 首次部署")
+    print(f"    │       └── run.py              ← 程序入口")
+    print(f"    ├── documents/              ← 飞书文档（运行后生成）")
+    print(f"    └── processed/              ← 处理产物（运行后生成）")
     if slim:
         print()
         print("  轻量部署说明：")
@@ -516,13 +582,22 @@ if __name__ == "__main__":
         "--slim", action="store_true",
         help="轻量部署（仅包含 ONNX 模型，不含 HuggingFace 缓存）",
     )
+    parser.set_defaults(include_models=True)
     parser.add_argument(
-        "--include-models", action="store_true",
-        help="包含 Embedding 模型文件（约 100MB，否则目标机首次运行时自动下载）",
+        "--include-models", dest="include_models", action="store_true",
+        help="包含 Embedding 模型文件（默认开启）",
+    )
+    parser.add_argument(
+        "--no-models", dest="include_models", action="store_false",
+        help="不包含 Embedding 模型文件（目标机首次运行时自动下载）",
     )
     parser.add_argument(
         "--include-venv", action="store_true",
         help="包含虚拟环境（约 1-2GB，目标机无需安装 Python 和依赖）",
+    )
+    parser.add_argument(
+        "--keep-configs", action="store_true",
+        help="保留 configs/ 中的敏感配置（与 slg-config 等共用时无需重复填写）",
     )
     args = parser.parse_args()
 
@@ -530,5 +605,6 @@ if __name__ == "__main__":
         include_models=args.include_models,
         include_venv=args.include_venv,
         slim=args.slim,
+        keep_configs=args.keep_configs,
     )
 

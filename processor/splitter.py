@@ -1318,14 +1318,21 @@ def process_document(input_path: Path, output_dir: Path = None, chunk_size: int 
 
     suffix = input_path.suffix.lower()
     
-    # 如果没有指定输出目录，从配置中生成
+    # 如果没有指定输出目录，从配置中读取 processed_dir
     if output_dir is None:
-        output_config = config.get('doc_splitter', {}).get('output', {})
-        root_dir = output_config.get('root_dir', 'processed')
-        structure = output_config.get('structure', 'nested')
-        add_timestamp = output_config.get('add_timestamp', True)
-        
-        output_dir = generate_output_path(input_path, root_dir, structure, add_timestamp, batch_timestamp=batch_timestamp)
+        from ..core.config import MODULE_DIR
+        paths = config.get('paths', {})
+        processed_dir_raw = paths.get('processed_dir', '')
+        if processed_dir_raw:
+            p = Path(processed_dir_raw)
+            base = p if p.is_absolute() else (MODULE_DIR / p).resolve()
+        else:
+            output_config = config.get('doc_splitter', {}).get('output', {})
+            root_dir = output_config.get('root_dir', 'processed')
+            base = generate_output_path(input_path, root_dir).parent
+
+        from ..core.utils import safe_filename
+        output_dir = base / safe_filename(input_path.stem, input_path.stem)
     
     try:
         if suffix == '.pdf':

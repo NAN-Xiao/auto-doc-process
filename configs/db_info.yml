@@ -2,6 +2,6 @@ database:
   enabled: true
   host: localhost
   port: 5432
-  database: twd
+  database: slg_config 
   user: postgres
   password: "111111"
