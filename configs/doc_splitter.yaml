@@ -71,6 +71,10 @@ paths:
 embedding:
   model: "BAAI/bge-small-zh-v1.5"
   batch_size: 16
+  # ONNX 推理线程（多核可适当调大，低配保持 2）
+  onnx:
+    intra_op_num_threads: 2
+    inter_op_num_threads: 2
   huggingface:
     cache_folder: "./models"
     device: "cpu"

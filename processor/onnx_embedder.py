@@ -37,13 +37,16 @@ class OnnxEmbeddings:
     """
 
     def __init__(self, onnx_dir: str, max_length: int = 512,
-                 normalize: bool = True, pooling: str = "cls"):
+                 normalize: bool = True, pooling: str = "cls",
+                 intra_op_num_threads: int = 2, inter_op_num_threads: int = 2):
         """
         Args:
             onnx_dir: ONNX 模型目录（包含 model.onnx + tokenizer 文件）
             max_length: 最大 token 长度
             normalize: 是否对输出做 L2 归一化
             pooling: 池化方式 ("cls" 或 "mean")
+            intra_op_num_threads: 算子内线程数（低配可 2，多核可调大）
+            inter_op_num_threads: 算子间线程数
         """
         import onnxruntime as ort
         from tokenizers import Tokenizer
@@ -57,12 +60,11 @@ class OnnxEmbeddings:
         if not tokenizer_path.exists():
             raise FileNotFoundError(f"分词器不存在: {tokenizer_path}")
 
-        # 加载 ONNX 模型
+        # 加载 ONNX 模型（线程数由配置或参数指定）
         sess_options = ort.SessionOptions()
         sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        # 限制线程数（低配服务器友好）
-        sess_options.intra_op_num_threads = 2
-        sess_options.inter_op_num_threads = 2
+        sess_options.intra_op_num_threads = intra_op_num_threads
+        sess_options.inter_op_num_threads = inter_op_num_threads
 
         self.session = ort.InferenceSession(
             str(model_path), sess_options,
@@ -82,7 +84,11 @@ class OnnxEmbeddings:
         self.input_names = [inp.name for inp in self.session.get_inputs()]
 
         Logger.info(f"ONNX Embedding 引擎已加载: {model_path.name}")
-        Logger.info(f"  池化: {pooling}, 归一化: {normalize}, max_length: {max_length}", indent=1)
+        Logger.info(
+            f"  池化: {pooling}, 归一化: {normalize}, max_length: {max_length}, "
+            f"线程: intra={intra_op_num_threads} inter={inter_op_num_threads}",
+            indent=1,
+        )
 
     def _encode_batch(self, texts: List[str]) -> np.ndarray:
         """将一批文本编码为向量"""
@@ -196,12 +202,19 @@ def create_embeddings(config: dict = None):
             normalize = meta.get("normalize", True)
             max_length = meta.get("max_length", 512)
 
+        # 从配置读取 ONNX 线程数（多核可调大）
+        onnx_cfg = (config or {}).get("embedding", {}).get("onnx", {})
+        intra = onnx_cfg.get("intra_op_num_threads", 2)
+        inter = onnx_cfg.get("inter_op_num_threads", 2)
+
         Logger.info("使用 ONNX Runtime 引擎（轻量模式）")
         return OnnxEmbeddings(
             onnx_dir=str(onnx_dir),
             max_length=max_length,
             normalize=normalize,
             pooling=pooling,
+            intra_op_num_threads=intra,
+            inter_op_num_threads=inter,
         )
     else:
         Logger.info("ONNX 模型不可用，使用 HuggingFace/torch 引擎")
