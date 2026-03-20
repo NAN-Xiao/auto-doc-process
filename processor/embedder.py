@@ -15,6 +15,7 @@
 """
 
 import json
+import re
 from pathlib import Path
 from typing import List, Dict, Any
 from datetime import datetime
@@ -22,6 +23,7 @@ from datetime import datetime
 from ..core.config import load_processor_config as load_config
 from ..core.logger import Logger
 from .onnx_embedder import create_embeddings
+from .quality import analyze_chunk_quality, compute_chunk_hash
 
 
 class EmbeddingGenerator:
@@ -39,8 +41,37 @@ class EmbeddingGenerator:
         
         # 初始化 embedding 引擎（自动选择 ONNX 或 torch 后端）
         self.embeddings = create_embeddings(self.config)
+        self._token_counter = self._build_token_counter()
         
         Logger.info("Embeddings 将保存到各文档的 processed 目录")
+
+    def _build_token_counter(self):
+        """构建 token 计数器，优先复用 embedding tokenizer。"""
+        tokenizer = getattr(self.embeddings, "tokenizer", None)
+        if tokenizer is not None:
+            def count_tokens(text: str) -> int:
+                if not text:
+                    return 0
+                try:
+                    return len(tokenizer.encode(text).ids)
+                except Exception:
+                    return len(text)
+            return count_tokens
+
+        def fallback_count(text: str) -> int:
+            if not text:
+                return 0
+            # 退化策略：中英文混合文本按词段近似计数，至少返回字符数的保守下界
+            units = re.findall(r'[\u4e00-\u9fff]|[A-Za-z0-9_]+', text)
+            return len(units) if units else len(text)
+
+        return fallback_count
+
+    def _extract_image_title(self, img_filename: str) -> str:
+        """从图片文件名提取稳定的标题文本。"""
+        stem = Path(img_filename).stem
+        stem = re.sub(r'_(p\d{4}_\d{3}|\d{3})$', '', stem)
+        return stem.strip()
         
     def extract_image_references(self, chunk_text: str) -> List[str]:
         """
@@ -77,17 +108,32 @@ class EmbeddingGenerator:
             'chunk_id': chunk_info.get('chunk_id', ''),
             'chunk_index': chunk_info.get('index', 0),
             'char_count': chunk_info.get('char_count', 0),
+            'chunk_token_count': self._token_counter(chunk_info.get('content', '')),
+            'chunk_hash': compute_chunk_hash(chunk_info.get('content', '')),
             
             # 文档信息
             'doc_format': doc_data['doc_info'].get('format', 'Unknown'),
             'doc_timestamp': doc_data['timestamp'],
             'processed_at': doc_data['doc_info'].get('created_at', ''),
+            'processed_batch_id': doc_data['timestamp'],
+            'doc_version_hash': doc_data['doc_info'].get('doc_version_hash', ''),
+            'space_id': doc_data['doc_info'].get('space_id', ''),
+            'source_url': doc_data['doc_info'].get('source_url', ''),
+            'source_updated_at': doc_data['doc_info'].get('source_updated_at', ''),
             
             # 图片信息
             'has_images': False,
             'image_count': 0,
-            'images': []
+            'images': [],
+            'image_titles': [],
         }
+
+        quality = analyze_chunk_quality(chunk_info.get('content', ''))
+        metadata['content_quality_score'] = quality['score']
+        metadata['quality_flags'] = quality['flags']
+        metadata['blank_ratio'] = quality['blank_ratio']
+        metadata['repeat_ratio'] = quality['repeat_ratio']
+        metadata['is_structured_chunk'] = quality['is_structured_chunk']
         
         # 提取图片引用
         chunk_text = chunk_info.get('content', '')
@@ -101,20 +147,26 @@ class EmbeddingGenerator:
             for img_filename in image_refs:
                 if img_filename in doc_data['images']:
                     img_info = doc_data['images'][img_filename]
+                    image_title = self._extract_image_title(img_filename)
                     metadata['images'].append({
                         'filename': img_filename,
                         'original_filename': img_info.get('original_filename', ''),
                         'path': f"./images/{img_filename}",
+                        'title': image_title,
                         'context_before': img_info.get('context_before', '')[:100],  # 限制长度
                         'context_after': img_info.get('context_after', '')[:100]
                     })
+                    metadata['image_titles'].append(image_title)
                 else:
                     # 图片信息未找到，仍然记录引用
+                    image_title = self._extract_image_title(img_filename)
                     metadata['images'].append({
                         'filename': img_filename,
-                        'path': f"./images/{img_filename}"
+                        'path': f"./images/{img_filename}",
+                        'title': image_title,
                     })
-        
+                    metadata['image_titles'].append(image_title)
+
         return metadata
     
     def build_embeddings_for_document(self, doc_data: Dict[str, Any]) -> int:
@@ -219,4 +271,3 @@ class EmbeddingGenerator:
             Logger.info(f"图片引用总数: {total_images}", indent=1)
         
         return len(texts)
-

@@ -216,6 +216,28 @@ download  →  process  →  store  →  graph
 | `.ready` 存在 | 写入完成，可安全读取（内含时间戳） |
 | 两者都不存在 | 无数据或尚未构建 |
 
+同时约定以下工作区产物供下游读取：
+
+| 文件 | 含义 |
+|------|------|
+| `_workspace_manifest.json` | 当前图谱工作区对应的批次、文档版本和质量摘要 |
+| `lightrag_report.json` | 本次图谱构建报告（文档数、chunks、质量摘要、PG 导出结果） |
+| `_graph_manifest.json` | 文档级增量清单（内容哈希、构建时间、版本标识） |
+
+---
+
+## 下游消费约定
+
+下游 RAG 可优先消费 `doc_chunks` 和 `lightrag_workspace/`：
+
+- `doc_chunks.chunk_text`：主检索文本
+- `doc_chunks.doc_name` / `source_url` / `chunk_index`：溯源定位
+- `doc_chunks.image_titles_json` / `has_images`：图文增强
+- `doc_chunks.content_quality_score` / `quality_flags_json`：过滤低质量块
+- `doc_chunks.doc_version_hash` / `processed_batch_id`：版本比对
+- `lightrag_workspace/.ready`：工作区完成信号
+- `lightrag_workspace/_workspace_manifest.json`：工作区批次与版本契约
+
 ---
 
 ## 关键调优参数

@@ -48,6 +48,7 @@ from lightrag.utils import EmbeddingFunc, always_get_an_event_loop
 from ..core.config import load_processor_config, load_db_config, CONFIGS_DIR
 from ..core.logger import Logger
 from ..core.utils import atomic_write_json, workspace_begin_write, workspace_end_write
+from .quality import summarize_batch_quality
 
 _tenacity_logger = logging.getLogger("feishu_sync")
 
@@ -566,6 +567,7 @@ class LightRAGGraphBuilder:
     # ── 图谱增量清单 ──
 
     GRAPH_MANIFEST_NAME = "_graph_manifest.json"
+    WORKSPACE_MANIFEST_NAME = "_workspace_manifest.json"
 
     @staticmethod
     def _content_hash(chunks: List[Dict[str, Any]]) -> str:
@@ -596,6 +598,11 @@ class LightRAGGraphBuilder:
         """保存图谱增量清单（原子写入 + 自动重试）"""
         manifest_path = processed_dir / LightRAGGraphBuilder.GRAPH_MANIFEST_NAME
         atomic_write_json(manifest_path, manifest)
+
+    @staticmethod
+    def _save_workspace_manifest(working_dir: Path, manifest: dict):
+        """保存工作区清单，供下游 RAG 直接读取。"""
+        atomic_write_json(working_dir / LightRAGGraphBuilder.WORKSPACE_MANIFEST_NAME, manifest)
 
     @staticmethod
     def clear_graph_data(processed_dir: Path, working_dir: str = None):
@@ -662,6 +669,25 @@ class LightRAGGraphBuilder:
                 raise
 
         raise last_err  # unreachable, for type checker
+
+    def _delete_doc_if_exists(self, loop, doc_name: str) -> bool:
+        """
+        如果 LightRAG workspace 中已存在同名文档，则先删除旧贡献。
+
+        这是图谱侧“同文档覆盖式增量更新”的关键：
+        LightRAG 的 ainsert(ids=[doc_name]) 不会覆盖已存在 doc_id，
+        而是会把它当成 duplicate 跳过，因此内容变化时必须先删后插。
+        """
+        existing_doc = loop.run_until_complete(self.rag.doc_status.get_by_id(doc_name))
+        if not existing_doc:
+            return False
+
+        delete_result = loop.run_until_complete(self.rag.adelete_by_doc_id(doc_name))
+        delete_status = getattr(delete_result, "status", "")
+        if delete_status not in {"success", "not_found"}:
+            message = getattr(delete_result, "message", "未知错误")
+            raise RuntimeError(f"删除旧图谱失败: {doc_name} ({delete_status}) {message}")
+        return delete_status == "success"
 
     def build_from_processed_dir(
         self,
@@ -733,6 +759,7 @@ class LightRAGGraphBuilder:
             "built": report["built_documents"],
             "skipped": report["skipped_documents"],
             "batch_timestamp": batch_timestamp,
+            "doc_versions": report.get("doc_versions", {}),
         })
         Logger.info("已写入 .ready 信号，RAG 读端可恢复读取")
 
@@ -751,6 +778,7 @@ class LightRAGGraphBuilder:
         total_chunks = 0
         doc_results = []
         skipped_count = 0
+        doc_quality_reports = []
 
         for doc_dir in sorted(doc_dirs):
             doc_name = doc_dir.name
@@ -766,9 +794,13 @@ class LightRAGGraphBuilder:
             if not force_rebuild and prev.get("hash") == current_hash:
                 skipped_count += 1
                 Logger.info(f"  跳过（未变化）: {doc_name}")
+                quality_report = self._load_doc_quality_report(doc_dir)
+                if quality_report:
+                    doc_quality_reports.append(quality_report)
                 doc_results.append({
                     "doc_name": doc_name, "chunks": len(chunks),
                     "success": True, "skipped": True,
+                    "doc_version_hash": prev.get("doc_version_hash", quality_report.get("doc_version_hash", "") if quality_report else ""),
                 })
                 for chunk in chunks:
                     chunk["doc_name"] = doc_name
@@ -784,6 +816,14 @@ class LightRAGGraphBuilder:
                 loop = always_get_an_event_loop()
                 insert_max_retries = self.config.get("performance", {}).get("insert_max_retries", 3)
                 insert_retry_delay = self.config.get("performance", {}).get("insert_retry_delay", 2.0)
+                had_prev_manifest = bool(prev)
+
+                if not force_rebuild:
+                    deleted_old_doc = self._delete_doc_if_exists(loop, doc_name)
+                    if deleted_old_doc:
+                        Logger.info(f"    已删除旧图谱贡献: {doc_name}")
+                    elif had_prev_manifest:
+                        Logger.info(f"    未发现旧 doc_status，按新文档重建: {doc_name}")
 
                 track_id = self._insert_with_retry(
                     loop, doc_text, doc_name, str(doc_dir),
@@ -792,9 +832,15 @@ class LightRAGGraphBuilder:
                 )
                 Logger.success(f"    图谱构建成功 (track_id: {track_id})")
 
+                quality_report = self._load_doc_quality_report(doc_dir)
+                if quality_report:
+                    doc_quality_reports.append(quality_report)
+
                 manifest[doc_name] = {
                     "hash": current_hash,
                     "built_at": datetime.now().isoformat(),
+                    "doc_version_hash": quality_report.get("doc_version_hash", "") if quality_report else "",
+                    "processed_batch_id": quality_report.get("processed_batch_id", batch_timestamp) if quality_report else batch_timestamp,
                 }
 
                 for chunk in chunks:
@@ -809,6 +855,7 @@ class LightRAGGraphBuilder:
                     "chars": len(doc_text),
                     "track_id": track_id,
                     "success": True,
+                    "doc_version_hash": manifest[doc_name].get("doc_version_hash", ""),
                 })
             except Exception as e:
                 Logger.error(f"    构建失败: {e}")
@@ -828,6 +875,12 @@ class LightRAGGraphBuilder:
 
         # ── 保存增量清单（原子写入） ──
         self._save_graph_manifest(processed_dir, manifest)
+        quality_summary = summarize_batch_quality(doc_quality_reports)
+        doc_versions = {
+            item.get("doc_name", ""): item.get("doc_version_hash", "")
+            for item in doc_quality_reports
+            if item.get("doc_name")
+        }
 
         # ---------- 导出到 PostgreSQL（二次备份） ----------
         pg_export_cfg = self.config.get("pg_export", {})
@@ -862,10 +915,22 @@ class LightRAGGraphBuilder:
             "skipped_documents": skipped_count,
             "success_documents": sum(1 for d in doc_results if d.get("success")),
             "total_chunks": total_chunks,
+            "doc_versions": doc_versions,
+            "quality_summary": quality_summary,
             "pg_export": pg_result,
             "documents": doc_results,
             "completed_at": datetime.now().isoformat(),
         }
+
+        self._save_workspace_manifest(Path(self._resolve_working_dir()), {
+            "batch_timestamp": batch_timestamp,
+            "completed_at": report["completed_at"],
+            "built_documents": built_count,
+            "skipped_documents": skipped_count,
+            "doc_versions": doc_versions,
+            "quality_summary": quality_summary,
+            "graph_manifest": str(processed_dir / self.GRAPH_MANIFEST_NAME),
+        })
 
         Logger.separator()
         Logger.success("知识图谱构建完成")
@@ -895,10 +960,12 @@ class LightRAGGraphBuilder:
 
             chunks = []
             chunks_dir = doc_dir / "chunks"
+            metadata_dir = doc_dir / "metadata"
 
             for chunk_info in index_data.get("chunks", []):
                 chunk_index = chunk_info["index"]
                 chunk_file = chunks_dir / f"chunk_{chunk_index:04d}.txt"
+                metadata_file = metadata_dir / f"chunk_{chunk_index:04d}.json"
 
                 if not chunk_file.exists():
                     continue
@@ -909,12 +976,20 @@ class LightRAGGraphBuilder:
                 if not content.strip():
                     continue
 
+                metadata = chunk_info.get("metadata", {})
+                if metadata_file.exists():
+                    try:
+                        with open(metadata_file, "r", encoding="utf-8") as mf:
+                            metadata = (json.load(mf) or {}).get("metadata", metadata)
+                    except Exception:
+                        pass
+
                 chunks.append({
                     "chunk_id": chunk_info.get("chunk_id", ""),
                     "index": chunk_info["index"],
                     "content": content,
                     "char_count": chunk_info.get("char_count", len(content)),
-                    "metadata": chunk_info.get("metadata", {}),
+                    "metadata": metadata,
                 })
 
             return chunks
@@ -922,4 +997,15 @@ class LightRAGGraphBuilder:
         except Exception as e:
             Logger.error(f"加载 chunks 失败: {e}")
             return []
+
+    def _load_doc_quality_report(self, doc_dir: Path) -> Dict[str, Any]:
+        """加载单文档质量报告。"""
+        report_file = doc_dir / "quality_report.json"
+        if not report_file.exists():
+            return {}
+        try:
+            with open(report_file, "r", encoding="utf-8") as f:
+                return json.load(f) or {}
+        except Exception:
+            return {}
 

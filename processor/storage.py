@@ -61,11 +61,20 @@ class PgVectorStorage:
         chunk_index       INTEGER NOT NULL DEFAULT 0,
         chunk_text        TEXT    NOT NULL,
         char_count        INTEGER NOT NULL DEFAULT 0,
+        chunk_token_count INTEGER NOT NULL DEFAULT 0,
+        chunk_hash        TEXT    NOT NULL DEFAULT '',
         page_number       INTEGER,
         has_images        BOOLEAN NOT NULL DEFAULT FALSE,
         image_count       INTEGER NOT NULL DEFAULT 0,
         images_json       TEXT    DEFAULT '[]',
+        image_titles_json TEXT    DEFAULT '[]',
+        content_quality_score DOUBLE PRECISION DEFAULT 0.0,
+        is_structured_chunk BOOLEAN NOT NULL DEFAULT FALSE,
+        quality_flags_json TEXT DEFAULT '[]',
         source_file       TEXT    NOT NULL DEFAULT '',
+        processed_batch_id TEXT DEFAULT '',
+        doc_version_hash  TEXT DEFAULT '',
+        source_updated_at TEXT DEFAULT '',
         embedding         vector({dim}),
         processed_at      TEXT    DEFAULT '',
         created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -98,6 +107,62 @@ class PgVectorStorage:
             WHERE table_name = 'doc_chunks' AND column_name = 'source_url'
         ) THEN
             ALTER TABLE doc_chunks ADD COLUMN source_url TEXT NOT NULL DEFAULT '';
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'chunk_token_count'
+        ) THEN
+            ALTER TABLE doc_chunks ADD COLUMN chunk_token_count INTEGER NOT NULL DEFAULT 0;
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'image_titles_json'
+        ) THEN
+            ALTER TABLE doc_chunks ADD COLUMN image_titles_json TEXT DEFAULT '[]';
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'chunk_hash'
+        ) THEN
+            ALTER TABLE doc_chunks ADD COLUMN chunk_hash TEXT NOT NULL DEFAULT '';
+            CREATE INDEX IF NOT EXISTS idx_doc_chunks_chunk_hash ON doc_chunks (chunk_hash);
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'content_quality_score'
+        ) THEN
+            ALTER TABLE doc_chunks ADD COLUMN content_quality_score DOUBLE PRECISION DEFAULT 0.0;
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'is_structured_chunk'
+        ) THEN
+            ALTER TABLE doc_chunks ADD COLUMN is_structured_chunk BOOLEAN NOT NULL DEFAULT FALSE;
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'quality_flags_json'
+        ) THEN
+            ALTER TABLE doc_chunks ADD COLUMN quality_flags_json TEXT DEFAULT '[]';
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'processed_batch_id'
+        ) THEN
+            ALTER TABLE doc_chunks ADD COLUMN processed_batch_id TEXT DEFAULT '';
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'doc_version_hash'
+        ) THEN
+            ALTER TABLE doc_chunks ADD COLUMN doc_version_hash TEXT DEFAULT '';
+            CREATE INDEX IF NOT EXISTS idx_doc_chunks_doc_version_hash ON doc_chunks (doc_version_hash);
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'source_updated_at'
+        ) THEN
+            ALTER TABLE doc_chunks ADD COLUMN source_updated_at TEXT DEFAULT '';
         END IF;
     END
     $$;
@@ -214,6 +279,9 @@ class PgVectorStorage:
 
             raw_meta = meta_data.get("metadata", {})
             images_list = raw_meta.get("images", [])
+            image_titles = raw_meta.get("image_titles", [])
+            if not image_titles and images_list:
+                image_titles = [img.get("title", "") for img in images_list if img.get("title")]
 
             return {
                 "id": meta_data.get("id", ""),
@@ -224,11 +292,20 @@ class PgVectorStorage:
                 "chunk_index": raw_meta.get("chunk_index", chunk_index),
                 "chunk_text": chunk_text,
                 "char_count": raw_meta.get("char_count", len(chunk_text)),
+                "chunk_token_count": raw_meta.get("chunk_token_count", 0),
+                "chunk_hash": raw_meta.get("chunk_hash", ""),
                 "page_number": raw_meta.get("page_number"),
                 "has_images": raw_meta.get("has_images", False),
                 "image_count": raw_meta.get("image_count", 0),
                 "images_json": json.dumps(images_list, ensure_ascii=False) if images_list else "[]",
+                "image_titles_json": json.dumps(image_titles, ensure_ascii=False) if image_titles else "[]",
+                "content_quality_score": raw_meta.get("content_quality_score", 0.0),
+                "is_structured_chunk": raw_meta.get("is_structured_chunk", False),
+                "quality_flags_json": json.dumps(raw_meta.get("quality_flags", []), ensure_ascii=False),
                 "source_file": raw_meta.get("source", ""),
+                "processed_batch_id": raw_meta.get("processed_batch_id", dir_info["timestamp"]),
+                "doc_version_hash": raw_meta.get("doc_version_hash", dir_info.get("doc_version_hash", "")),
+                "source_updated_at": raw_meta.get("source_updated_at", dir_info.get("source_updated_at", "")),
                 "space_id": dir_info.get("space_id", ""),
                 "source_url": dir_info.get("source_url", ""),
                 "embedding": emb_data["embedding"],
@@ -396,19 +473,22 @@ class PgVectorStorage:
         sql = """
             INSERT INTO doc_chunks
                 (doc_name, doc_format, doc_timestamp, chunk_id, chunk_index,
-                 chunk_text, char_count, page_number, has_images, image_count,
-                 images_json, source_file, space_id, source_url,
+                 chunk_text, char_count, chunk_token_count, chunk_hash, page_number, has_images, image_count,
+                 images_json, image_titles_json, content_quality_score, is_structured_chunk, quality_flags_json,
+                 source_file, processed_batch_id, doc_version_hash, source_updated_at, space_id, source_url,
                  embedding, processed_at,
                  created_at, updated_at)
-            VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s)
+            VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s,%s,%s,%s, %s,%s,%s,%s,%s,%s, %s,%s,%s,%s,%s, %s,%s, %s,%s)
         """
         params = [
             (
                 c["doc_name"], c["doc_format"], c["doc_timestamp"],
                 c["chunk_id"], c["chunk_index"],
-                c["chunk_text"], c["char_count"], c["page_number"],
+                c["chunk_text"], c["char_count"], c["chunk_token_count"], c["chunk_hash"], c["page_number"],
                 c["has_images"], c["image_count"],
-                c["images_json"], c["source_file"],
+                c["images_json"], c["image_titles_json"], c["content_quality_score"],
+                c["is_structured_chunk"], c["quality_flags_json"], c["source_file"],
+                c["processed_batch_id"], c["doc_version_hash"], c["source_updated_at"],
                 c["space_id"], c["source_url"],
                 c["embedding"], c["processed_at"],
                 now, now,

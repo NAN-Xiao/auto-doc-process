@@ -15,8 +15,8 @@ deepseek:
 
 doc_splitter:
   text_splitter:
-    chunk_size: 1000      # 文本块大小（字符）
-    chunk_overlap: 200    # 块间重叠（字符）
+    chunk_size: 1000      # 目标块大小；有 tokenizer 时按 token 计，并自动限制在 embedding 安全上限内
+    chunk_overlap: 200    # 目标重叠；有 tokenizer 时按 token 计，过大将自动压缩
     separators: ["\n\n", "\n", "。", "！", "？", "；", "，", " ", ""]
 
   image_naming:

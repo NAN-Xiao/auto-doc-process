@@ -182,6 +182,21 @@ def step_process(config: dict, download_result: dict = None,
 
     log.info(f"处理完成: 成功={proc_success} 跳过(空文档)={proc_skip} 失败={proc_fail}")
 
+    try:
+        quality_report = workflow.build_batch_quality_report(proc_results)
+        quality_report.update({
+            "batch_timestamp": batch_timestamp,
+            "success_documents": proc_success,
+            "skipped_documents": proc_skip,
+            "failed_documents": proc_fail,
+        })
+        processed_dir = _resolve_processed_dir()
+        report_file = processed_dir / "preprocessing_quality_report.json"
+        atomic_write_json(report_file, quality_report)
+        log.info(f"预处理质量报告已保存（原子写入）: {report_file}")
+    except Exception as e:
+        log.warning(f"生成预处理质量报告失败: {e}")
+
     return {
         "results": proc_results,
         "success": proc_success,
@@ -224,7 +239,7 @@ def _collect_items_to_process(config: dict, download_result: dict,
                 log.info(f"  待处理(未入库): {Path(file_path).name}")
                 items.append({
                     "path": file_path,
-                    "entry": {"space_id": "", "url": ""},
+                    "entry": {"space_id": "", "url": "", "obj_edit_time": record.get("obj_edit_time", "")},
                 })
 
         # manifest 为空或没找到待处理文档时，兜底扫描文档目录
@@ -238,7 +253,7 @@ def _collect_items_to_process(config: dict, download_result: dict,
                             log.info(f"  待处理(目录扫描): {f.name}")
                             items.append({
                                 "path": str(f),
-                                "entry": {"space_id": "", "url": ""},
+                                "entry": {"space_id": "", "url": "", "obj_edit_time": ""},
                             })
 
     # 过滤无效项
@@ -289,6 +304,7 @@ def _run_process_with_isolation(items: list, batch_timestamp: str,
                         "doc_meta": {
                             "space_id": item.get("entry", {}).get("space_id", ""),
                             "source_url": item.get("entry", {}).get("url", ""),
+                            "source_updated_at": item.get("entry", {}).get("obj_edit_time", ""),
                         },
                     }
                     for item in remaining
@@ -561,6 +577,21 @@ def _load_results_from_processed_dir(workflow, reset_db: bool = False) -> list:
 
         log.info(f"  加载: {doc_name} ({len(chunk_files)} chunks)")
 
+        # 独立执行 store 时，尽量从已处理 metadata 回读来源信息
+        # 这样 download->process 与后续单独 store 拆开执行时，space_id/source_url 不会丢失
+        space_id = ""
+        source_url = ""
+        try:
+            with open(chunk_files[0], "r", encoding="utf-8") as f:
+                first_meta = json.load(f) or {}
+            raw_meta = first_meta.get("metadata", {}) if isinstance(first_meta, dict) else {}
+            if isinstance(raw_meta, dict):
+                space_id = raw_meta.get("space_id", "") or ""
+                source_url = raw_meta.get("source_url", "") or ""
+        except Exception:
+            # metadata 读取失败时回退空值，保持兼容
+            pass
+
         results.append({
             "success": True,
             "doc_name": doc_name,
@@ -570,8 +601,8 @@ def _load_results_from_processed_dir(workflow, reset_db: bool = False) -> list:
                 "embeddings_dir": embeddings_dir,
                 "metadata_dir": metadata_dir,
                 "chunks_dir": chunks_dir,
-                "space_id": "",
-                "source_url": "",
+                "space_id": space_id,
+                "source_url": source_url,
             },
         })
 

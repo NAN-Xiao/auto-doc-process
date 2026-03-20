@@ -10,7 +10,7 @@
 import sys
 import json
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Callable
 from dataclasses import dataclass, asdict
 import hashlib
 from datetime import datetime
@@ -293,18 +293,27 @@ class DocumentSplitter:
         """
         self.use_llm_naming = use_llm_naming
         self.llm = None
+        self._token_length: Callable[[str], int] = len
         
         # 配置注入：优先使用传入的 config，否则从文件加载
         self.config = config if config is not None else load_config()
         
         # chunk 参数优先从配置读取，构造函数参数作为 fallback
         splitter_cfg = self.config.get('doc_splitter', {}).get('text_splitter', {})
-        self.chunk_size = splitter_cfg.get('chunk_size', chunk_size)
-        self.chunk_overlap = splitter_cfg.get('chunk_overlap', chunk_overlap)
+        configured_chunk_size = splitter_cfg.get('chunk_size', chunk_size)
+        configured_chunk_overlap = splitter_cfg.get('chunk_overlap', chunk_overlap)
         
         # 从配置读取图片命名参数
         image_naming_config = self.config.get('doc_splitter', {}).get('image_naming', {})
         self.image_max_length = image_naming_config.get('max_length', 18)
+
+        # 优先按 embedding tokenizer 的 token 长度切分，避免向量化阶段被截断
+        token_length, safe_chunk_size, safe_chunk_overlap = self._build_length_function(
+            configured_chunk_size, configured_chunk_overlap
+        )
+        self._token_length = token_length
+        self.chunk_size = safe_chunk_size
+        self.chunk_overlap = safe_chunk_overlap
         
         # 如果启用 LLM 命名，初始化 LLM
         if use_llm_naming:
@@ -344,10 +353,65 @@ class DocumentSplitter:
             separators=splitter_cfg.get('separators', [
                 "\n\n", "\n", "。", "！", "？", "；", "，", " ", ""
             ]),
-            length_function=len,
+            length_function=self._token_length,
         )
         
         Logger.info(f"语义分割器已初始化: chunk_size={self.chunk_size}, overlap={self.chunk_overlap}")
+
+    def _build_length_function(self, configured_chunk_size: int,
+                               configured_chunk_overlap: int) -> Tuple[Callable[[str], int], int, int]:
+        """
+        构建长度函数和安全的 chunk 参数。
+
+        优先使用 embedding tokenizer 统计 token 数，并把 chunk 大小限制在
+        embedding 模型最大 token 长度以内，避免向量化阶段截断。
+        """
+        max_tokens = 512
+        reserve_tokens = 32
+
+        try:
+            from .onnx_embedder import _resolve_onnx_dir
+            onnx_dir = _resolve_onnx_dir(self.config)
+            meta_file = onnx_dir / "model_meta.json"
+            tokenizer_path = onnx_dir / "tokenizer.json"
+
+            if meta_file.exists():
+                with open(meta_file, "r", encoding="utf-8") as f:
+                    model_meta = json.load(f)
+                max_tokens = int(model_meta.get("max_length", max_tokens))
+
+            if tokenizer_path.exists():
+                from tokenizers import Tokenizer
+
+                tokenizer = Tokenizer.from_file(str(tokenizer_path))
+
+                def token_length(text: str) -> int:
+                    if not text:
+                        return 0
+                    return len(tokenizer.encode(text).ids)
+
+                safe_chunk_size = min(int(configured_chunk_size), max_tokens - reserve_tokens)
+                if safe_chunk_size <= 0:
+                    safe_chunk_size = max(128, max_tokens // 2)
+                safe_chunk_overlap = min(int(configured_chunk_overlap), max(0, safe_chunk_size // 4))
+
+                if configured_chunk_size != safe_chunk_size:
+                    Logger.warning(
+                        f"chunk_size={configured_chunk_size} 超过 embedding 安全上限，已自动调整为 {safe_chunk_size} tokens",
+                        indent=1,
+                    )
+                if configured_chunk_overlap != safe_chunk_overlap:
+                    Logger.warning(
+                        f"chunk_overlap={configured_chunk_overlap} 过大，已自动调整为 {safe_chunk_overlap} tokens",
+                        indent=1,
+                    )
+
+                return token_length, safe_chunk_size, safe_chunk_overlap
+        except Exception as e:
+            Logger.warning(f"token 长度函数初始化失败，回退到字符长度切分: {e}", indent=1)
+
+        safe_chunk_overlap = min(int(configured_chunk_overlap), max(0, int(configured_chunk_size) // 4))
+        return len, int(configured_chunk_size), safe_chunk_overlap
     
     def split_text(self, text: str, metadata: Optional[Dict] = None) -> List[str]:
         """
@@ -431,15 +495,84 @@ class DocumentSplitter:
         for image_info in image_infos:
             # 旧的占位符格式：[图片: images/img_001_image1.png]
             old_placeholder = f"[图片: images/{image_info.original_filename}]"
-            
-            # 文件名已在生成时做过 URL 安全清洗（无空格、无特殊字符）
-            # 新的占位符格式：图片：./images/副本开启界面_001.png
-            new_placeholder = f"图片：./images/{image_info.smart_filename}"
+
+            image_title = Path(image_info.smart_filename).stem
+            image_title = re.sub(r'_(p\d{4}_\d{3}|\d{3})$', '', image_title)
+
+            context_parts = []
+            if image_info.context_before:
+                context_parts.append(f"图片前文：{self._compact_text(image_info.context_before, 80)}")
+            if image_info.context_after:
+                context_parts.append(f"图片后文：{self._compact_text(image_info.context_after, 80)}")
+
+            placeholder_lines = [
+                f"图片：./images/{image_info.smart_filename}",
+                f"图片标题：{image_title}",
+            ]
+            placeholder_lines.extend(context_parts)
+            new_placeholder = "\n".join(placeholder_lines)
             
             # 替换占位符
             updated_text = updated_text.replace(old_placeholder, new_placeholder)
         
         return updated_text
+
+    def _compact_text(self, text: str, max_length: int = 120) -> str:
+        """压缩文本中的空白和连续重复片段，适合作为图片上下文摘要。"""
+        compacted = re.sub(r'\s+', ' ', text).strip()
+        compacted = self._deduplicate_text(compacted)
+        if len(compacted) > max_length:
+            return compacted[:max_length].rstrip()
+        return compacted
+
+    def _deduplicate_text(self, text: str) -> str:
+        """
+        去除文本内部的明显重复
+        例如：'GVG报名GVG报名GVG报名' -> 'GVG报名'
+        """
+        dedup_config = self.config.get('doc_splitter', {}).get('text_deduplication', {})
+        if not dedup_config.get('enabled', True):
+            return text
+
+        min_length = dedup_config.get('min_text_length', 10)
+        min_pattern = dedup_config.get('min_pattern_length', 3)
+        threshold = dedup_config.get('repeat_ratio_threshold', 0.6)
+
+        if not text or len(text) < min_length:
+            return text
+
+        cleaned = re.sub(r'\s+', ' ', text).strip()
+
+        for pattern_len in range(min_pattern, min(len(cleaned) // 2 + 1, 40)):
+            pattern = cleaned[:pattern_len]
+            if len(pattern) < min_pattern:
+                continue
+
+            repeat_count = 1
+            pos = pattern_len
+            while pos + pattern_len <= len(cleaned):
+                if cleaned[pos:pos + pattern_len] == pattern:
+                    repeat_count += 1
+                    pos += pattern_len
+                else:
+                    break
+
+            if repeat_count >= 2 and (repeat_count * pattern_len) >= len(cleaned) * threshold:
+                remaining = cleaned[repeat_count * pattern_len:]
+                cleaned = pattern + remaining
+                break
+
+        changed = True
+        while changed:
+            changed = False
+            for pattern_len in range(min_pattern, min(len(cleaned) // 2 + 1, 24)):
+                pattern = re.compile(rf'(.{{{pattern_len}}})(\1{{1,}})')
+                updated = pattern.sub(r'\1', cleaned)
+                if updated != cleaned:
+                    cleaned = updated
+                    changed = True
+
+        return cleaned
 
 
 class PDFSplitter(DocumentSplitter):
@@ -864,6 +997,7 @@ class WordSplitter(DocumentSplitter):
             self.Document = Document
             self.CT_Tbl = CT_Tbl
             self.CT_P = CT_P
+            self.Paragraph = Paragraph
         except ImportError as e:
             raise ImportError(f"缺少依赖 python-docx: {e}。请安装: pip install python-docx") from e
     
@@ -973,7 +1107,8 @@ class WordSplitter(DocumentSplitter):
                 has_image = ('a:blip' in element_xml or 'blip' in element_xml.lower() or 
                             'v:imagedata' in element_xml or 'imagedata' in element_xml.lower())
                 
-                para_text = ''.join(element.itertext()).strip()
+                paragraph = self.Paragraph(element, doc)
+                para_text = paragraph.text.strip()
                 
                 # 去除段落内的明显重复（如"GVG报名GVG报名GVG报名"）
                 para_text = self._remove_internal_duplicates(para_text)
@@ -983,9 +1118,8 @@ class WordSplitter(DocumentSplitter):
                 heading_level = 0
                 try:
                     # 尝试从段落样式中获取标题信息
-                    style_element = element.find('.//w:pStyle', namespaces={'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})
-                    if style_element is not None:
-                        style_name = style_element.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val', '')
+                    style_name = getattr(paragraph.style, 'name', '') if paragraph.style else ''
+                    if style_name:
                         # 检查是否是标题样式
                         if 'Heading' in style_name or '标题' in style_name:
                             is_heading = True
@@ -1133,46 +1267,7 @@ class WordSplitter(DocumentSplitter):
         Returns:
             去重后的文本
         """
-        # 从配置读取去重参数
-        dedup_config = self.config.get('doc_splitter', {}).get('text_deduplication', {})
-        
-        # 检查是否启用去重
-        if not dedup_config.get('enabled', True):
-            return text
-        
-        min_length = dedup_config.get('min_text_length', 10)
-        min_pattern = dedup_config.get('min_pattern_length', 3)
-        threshold = dedup_config.get('repeat_ratio_threshold', 0.6)
-        
-        if not text or len(text) < min_length:
-            return text
-        
-        # 策略：检测连续重复的模式
-        # 尝试不同的重复长度（从min_pattern到文本长度的1/2）
-        for pattern_len in range(min_pattern, len(text) // 2 + 1):
-            pattern = text[:pattern_len]
-            
-            # 检查这个模式是否连续重复
-            if len(pattern) >= min_pattern:
-                # 计算这个模式连续重复了多少次
-                repeat_count = 1
-                pos = pattern_len
-                
-                while pos + pattern_len <= len(text):
-                    if text[pos:pos + pattern_len] == pattern:
-                        repeat_count += 1
-                        pos += pattern_len
-                    else:
-                        break
-                
-                # 如果重复了2次或以上，且重复部分占据了超过阈值的文本
-                if repeat_count >= 2 and (repeat_count * pattern_len) >= len(text) * threshold:
-                    # 保留一次，后面加上剩余的非重复部分
-                    remaining = text[repeat_count * pattern_len:]
-                    return pattern + remaining
-        
-        # 没有发现明显重复，返回原文
-        return text
+        return self._deduplicate_text(text)
     
     def _extract_table_text(self, table_element) -> str:
         """提取表格文本"""

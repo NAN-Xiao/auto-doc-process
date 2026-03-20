@@ -9,10 +9,11 @@ import json
 
 from ..core.config import load_processor_config as load_config
 from ..core.logger import Logger
-from ..core.utils import safe_filename
+from ..core.utils import safe_filename, atomic_write_json
 from .splitter import process_document, generate_output_path
 from .embedder import EmbeddingGenerator
 from .storage import PgVectorStorage
+from .quality import compute_chunk_hash, compute_document_version_hash, summarize_document_quality, summarize_batch_quality
 
 
 class BatchWorkflow:
@@ -157,15 +158,23 @@ class BatchWorkflow:
                 return result
 
             images = self._load_images(output_path)
+            for chunk in chunks:
+                chunk["chunk_hash"] = compute_chunk_hash(chunk.get("content", ""))
+            doc_version_hash = compute_document_version_hash(chunks)
 
             doc_data = {
                 'path': output_path,
                 'doc_name': safe_filename(doc_path.stem, doc_path.stem),
                 'timestamp': batch_timestamp,
                 'doc_info': {
+                    'format': doc_info.format,
                     'chunks_count': doc_info.total_chunks,
                     'images_count': doc_info.total_images,
-                    'created_at': doc_info.created_at
+                    'created_at': doc_info.created_at,
+                    'doc_version_hash': doc_version_hash,
+                    'space_id': (doc_meta or {}).get('space_id', ''),
+                    'source_url': (doc_meta or {}).get('source_url', ''),
+                    'source_updated_at': (doc_meta or {}).get('source_updated_at', ''),
                 },
                 'chunks': chunks,
                 'images': images
@@ -198,7 +207,18 @@ class BatchWorkflow:
                 'chunks_dir': output_path / 'chunks',
                 'space_id': _meta.get('space_id', ''),
                 'source_url': _meta.get('source_url', ''),
+                'doc_version_hash': doc_version_hash,
+                'source_updated_at': _meta.get('source_updated_at', ''),
             }
+            result['doc_version_hash'] = doc_version_hash
+
+            quality_report = self._build_document_quality_report(
+                output_path=output_path,
+                doc_name=doc_data['doc_name'],
+                batch_timestamp=batch_timestamp,
+                doc_version_hash=doc_version_hash,
+            )
+            result['quality_report'] = quality_report
 
             # ---- 步骤3：存入 PostgreSQL (pgvector) ----
             if store_to_db and self.vector_storage:
@@ -316,6 +336,50 @@ class BatchWorkflow:
         except Exception as e:
             Logger.warning(f"加载 images 失败: {e}")
             return {}
+
+    def _build_document_quality_report(self, output_path: Path, doc_name: str,
+                                       batch_timestamp: str, doc_version_hash: str) -> Dict[str, Any]:
+        """汇总单文档质量报告并落盘。"""
+        metadata_dir = output_path / "metadata"
+        chunk_reports: List[Dict[str, Any]] = []
+        for meta_file in sorted(metadata_dir.glob("chunk_*.json")):
+            try:
+                with open(meta_file, 'r', encoding='utf-8') as f:
+                    meta = json.load(f)
+                m = meta.get("metadata", {})
+                chunk_reports.append({
+                    "chunk_index": m.get("chunk_index", meta.get("chunk_index", 0)),
+                    "chunk_id": m.get("chunk_id", ""),
+                    "chunk_token_count": m.get("chunk_token_count", 0),
+                    "content_quality_score": m.get("content_quality_score", 0.0),
+                    "quality_flags": m.get("quality_flags", []),
+                    "is_structured_chunk": m.get("is_structured_chunk", False),
+                    "has_images": m.get("has_images", False),
+                    "metadata": m,
+                })
+            except Exception as e:
+                Logger.warning(f"读取质量元数据失败 {meta_file.name}: {e}", indent=1)
+
+        summary = summarize_document_quality(chunk_reports)
+        summary.update({
+            "doc_name": doc_name,
+            "processed_batch_id": batch_timestamp,
+            "doc_version_hash": doc_version_hash,
+            "generated_at": datetime.now().isoformat(),
+        })
+        atomic_write_json(output_path / "quality_report.json", summary)
+        return summary
+
+    def build_batch_quality_report(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """汇总批次质量报告。"""
+        doc_reports = []
+        for item in results:
+            if item and item.get("quality_report"):
+                doc_reports.append(item["quality_report"])
+        report = summarize_batch_quality(doc_reports)
+        report["generated_at"] = datetime.now().isoformat()
+        report["documents"] = doc_reports
+        return report
     
     def _load_chunks(self, doc_dir: Path) -> List[Dict[str, Any]]:
         """
@@ -427,4 +491,3 @@ class BatchWorkflow:
         Logger.separator()
         
         return report
-

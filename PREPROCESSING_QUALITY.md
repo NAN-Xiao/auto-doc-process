@@ -57,6 +57,14 @@
 - `doc_name`、`doc_timestamp`、`chunk_id`、`chunk_index`  
 - `source_file`、`space_id`、`source_url`（飞书来源）  
 - `page_number`、`has_images`、`images_json`（图片引用）
+- `chunk_token_count`、`chunk_hash`、`doc_version_hash`、`processed_batch_id`
+- `content_quality_score`、`quality_flags_json`、`is_structured_chunk`
+
+本地工作区还会输出：
+
+- `processed/{文档名}/quality_report.json`：单文档质量报告
+- `processed/preprocessing_quality_report.json`：批次质量报告
+- `processed/lightrag_workspace/_workspace_manifest.json`：图谱工作区版本与质量摘要
 
 **质量检查**：抽样查库或看 `metadata/chunk_*.json`，确认 `source_url`、`page_number`、`images_json` 是否齐全，便于召回后跳转原文或定位图片。
 
@@ -72,6 +80,7 @@
 
 - **如何自查**  
   - 看 `lightrag_workspace/` 下产出（或 PG 中 lightrag 相关表）：实体名是否合理、关系是否与文档一致、是否大量无关实体。
+  - 看 `_workspace_manifest.json` 与 `lightrag_report.json`：确认当前图谱对应的 `batch_timestamp`、`doc_version_hash`、质量摘要是否和本次预处理一致。
 
 ---
 
