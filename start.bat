@@ -29,6 +29,7 @@ REM 运维:
 REM   start.bat stop                         停止运行中的进程并清理锁文件
 REM   start.bat status                       查看进程状态
 REM   start.bat reset                        清理所有构建产物（数据库+缓存+清单），不重建
+REM   start.bat refresh                      刷新数据库（清空后用 processed/ 数据重建）
 
 cd /d "%~dp0.."
 
@@ -36,6 +37,7 @@ REM ── 处理 stop / status / reset 命令 ──
 if /i "%~1"=="stop" goto :do_stop
 if /i "%~1"=="status" goto :do_status
 if /i "%~1"=="reset" goto :do_reset
+if /i "%~1"=="refresh" goto :do_refresh
 
 REM ── 正常启动 ──
 if not exist "auto-doc-process\venv\Scripts\python.exe" (
@@ -145,3 +147,30 @@ REM 调用 Python 的 --reset 逻辑（清数据库+缓存+清单）
 echo.
 echo [RESET] 完成。下次运行将从零开始。
 exit /b 0
+
+
+REM ══════════════════════════════════════════════
+REM  refresh — 刷新数据库（清空后用 processed/ 重建）
+REM ══════════════════════════════════════════════
+:do_refresh
+echo [REFRESH] 刷新数据库（清空表 → 用 processed/ 数据重建）...
+echo.
+
+REM 先停止进程
+taskkill /f /im python.exe >nul 2>&1
+
+REM 清理锁文件
+set LOCK_FILE=%~dp0..\_runtime\.lock
+if exist "%LOCK_FILE%" del /f "%LOCK_FILE%"
+
+REM 清空数据库 + 从 processed/ 重新入库（不重建图谱，图谱需要调 LLM API）
+"auto-doc-process\venv\Scripts\python.exe" "auto-doc-process\run.py" --reset-db --step store
+
+set EXIT_CODE=%ERRORLEVEL%
+echo.
+if %EXIT_CODE% EQU 0 (
+    echo [REFRESH] 数据库刷新完成
+) else (
+    echo [REFRESH] 刷新失败，退出码: %EXIT_CODE%
+)
+exit /b %EXIT_CODE%

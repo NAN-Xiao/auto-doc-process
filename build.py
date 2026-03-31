@@ -241,6 +241,22 @@ def build(include_models: bool = True, include_venv: bool = False,
         '\n'
         'cd /d "%~dp0"\n'
         '\n'
+        ':: ── Python 版本校验（解析 python --version 输出） ──\n'
+        'set PY_VER=\n'
+        'for /f "tokens=2 delims= " %%v in (\'python --version 2^>^&1\') do set PY_FULL=%%v\n'
+        'for /f "tokens=1,2 delims=." %%a in ("%PY_FULL%") do set PY_VER=%%a.%%b\n'
+        'if not "%PY_VER%"=="' + py_ver + '" (\n'
+        '    echo [错误] Python 版本不匹配！\n'
+        '    echo   需要: Python ' + py_ver + '  ^(.pyc 编译版本^)\n'
+        '    echo   当前: Python %PY_VER% ^(%PY_FULL%^)\n'
+        '    echo.\n'
+        '    echo   请安装 Python ' + py_ver + '.x 后重试\n'
+        '    echo   下载: https://www.python.org/downloads/\n'
+        '    pause\n'
+        '    exit /b 1\n'
+        ')\n'
+        'echo [Python] 版本 %PY_VER% OK\n'
+        '\n'
         'set REUSE_DEPS=0\n'
         'if exist "venv\\Scripts\\python.exe" (\n'
         '    echo [1/4] 检测到已存在的 venv，将重建以修复路径（复用已有依赖）...\n'
@@ -320,6 +336,7 @@ def build(include_models: bool = True, include_venv: bool = False,
         'if /i "%~1"=="stop" goto :do_stop',
         'if /i "%~1"=="status" goto :do_status',
         'if /i "%~1"=="reset" goto :do_reset',
+        'if /i "%~1"=="refresh" goto :do_refresh',
         '',
         ':: 参数校验：非空且不以 -- 开头 → 无效命令',
         'if not "%~1"=="" (',
@@ -359,6 +376,16 @@ def build(include_models: bool = True, include_venv: bool = False,
         'echo [OK] Reset complete',
         'exit /b 0',
         '',
+        ':do_refresh',
+        'echo [REFRESH] Refresh DB from processed/ data...',
+        'taskkill /f /im python.exe >nul 2>&1',
+        'set LOCK_FILE=%~dp0_runtime\\.lock',
+        'if exist "%LOCK_FILE%" del /f "%LOCK_FILE%"',
+        f'"{proj_name}\\venv\\Scripts\\python.exe" "{proj_name}\\run.py" --reset-db --step store',
+        'set EXIT_CODE=%ERRORLEVEL%',
+        'if %EXIT_CODE% EQU 0 (echo [OK] DB refreshed) else (echo [FAIL] Exit code: %EXIT_CODE%)',
+        'exit /b %EXIT_CODE%',
+        '',
         ':usage',
         'echo.',
         'echo  start.bat                        Run full pipeline',
@@ -374,6 +401,7 @@ def build(include_models: bool = True, include_venv: bool = False,
         'echo  start.bat stop                    Stop processes',
         'echo  start.bat status                  Show status',
         'echo  start.bat reset                   Clean all artifacts',
+        'echo  start.bat refresh                 Refresh DB from processed/ data',
         'echo.',
         'exit /b 1',
     ]
