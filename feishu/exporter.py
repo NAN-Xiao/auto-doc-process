@@ -278,6 +278,8 @@ def batch_export(client, config: dict, entries: list, output_dir: Path,
             pending.append({"task": task, "ticket": ticket, "attempt": 1})
         except Exception as e:
             log.error(f"  {prefix} 创建失败: {e}")
+            log.error(f"    token={task['actual_token']}, type={task['actual_type']}, "
+                      f"ext={task['ext']}, name={task['name']}")
             fail_list.append({"entry": task["entry"], "error": str(e)})
 
         # 限速：每创建一个任务等一下，避免触发频率限制

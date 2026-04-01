@@ -286,7 +286,8 @@ def create_export_task(client, doc_token: str, doc_type: str, file_ext: str) -> 
     response = client.drive.v1.export_task.create(request)
 
     if not response.success():
-        log.error(f"创建导出任务失败: code={response.code}, msg={response.msg}")
+        log.error(f"创建导出任务失败: code={response.code}, msg={response.msg}"
+                  f" (token={doc_token}, type={doc_type}, ext={file_ext})")
         return None
 
     ticket = response.data.ticket if response.data else None
