@@ -22,8 +22,8 @@ feishu:
     type_format_map:
       doc: "docx"
       docx: "docx"
-      #sheet: "xlsx"
-      #bitable: "xlsx"
+      # sheet: "xlsx"
+      # bitable: "xlsx"
 
     skip_types: ["mindnote", "file", "slides", "catalog"]
 

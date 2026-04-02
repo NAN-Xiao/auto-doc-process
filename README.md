@@ -54,8 +54,8 @@ feishu:
     type_format_map:            # 文档类型 → 导出格式
       doc: "docx"
       docx: "docx"
-      sheet: "xlsx"
-      bitable: "xlsx"
+      # sheet: "xlsx"           # 本工程默认不从飞书下载 Excel
+      # bitable: "xlsx"
     skip_types: ["mindnote", "file", "slides", "catalog"]
 
   schedule:
@@ -174,7 +174,7 @@ lightrag:
 ```
 start.bat                            全流程（下载→处理→入库→图谱）
 start.bat --step download            只下载
-start.bat --step process             只处理（文档拆分/向量化 + Excel 元数据）
+start.bat --step process             只处理（文档拆分/向量化 + 本地 Excel 元数据）
 start.bat --step store               只入库
 start.bat --step graph               只构建图谱
 start.bat --step download,process    组合执行
@@ -201,7 +201,7 @@ download  →  process  →  store  →  graph
  飞书下载     文档拆分+向量化+Excel元数据   pgvector入库   LightRAG图谱
 ```
 
-- **默认增量**：飞书文档按 manifest 增量处理；`excel_dir` 下的 Excel 会在 `process` 阶段统一重新生成 metadata
+- **默认增量**：飞书文档按 manifest 增量处理；`excel_dir` 下的本地 Excel 会在 `process` 阶段统一重新生成 metadata
 - **`--full`**：忽略增量记录，重新处理全部
 - **`--reset-db`**：清空数据库后全量重建
 

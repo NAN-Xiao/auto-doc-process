@@ -246,7 +246,7 @@ def _collect_items_to_process(config: dict, download_result: dict,
                     "entry": {"space_id": "", "url": "", "obj_edit_time": record.get("obj_edit_time", "")},
                 })
 
-        # manifest 为空或没找到待处理文档时，兜底扫描文档目录
+        # manifest 为空或没找到待处理文档时，兜底扫描下载目录
         if not items:
             docs_dir = config.get("output_dir")
             if docs_dir and Path(docs_dir).exists():
