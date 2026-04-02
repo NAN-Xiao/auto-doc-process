@@ -38,7 +38,7 @@
 | 项 | 建议 |
 |---|------|
 | **配置入口** | 将「飞书 + 处理 + DB + LightRAG」的扁平配置收敛到 1～2 个加载入口，避免多处各自 `load_processor_config` / `load_db_config`，减少不一致与重复读 YAML。 |
-| **大文件拆分** | `processor/splitter.py` 超过 1300 行，可拆成 `splitter/` 包：如 `splitter/pdf.py`、`splitter/docx.py`、`splitter/llm_naming.py`，主入口保留在 `splitter.py`。 |
+| **大文件拆分** | 当前已拆为 `processor/splitter_base.py`、`processor/pdf_splitter.py`、`processor/word_splitter.py`，后续可继续把图片命名、结构化构块、OCR 再拆成更细模块；流程编排已迁到 `pipeline/orchestrator.py`。 |
 | **类型注解** | 对 `__main__.py`、`workflow.py`、`storage.py` 等入口与公共接口补全类型注解，便于静态检查与重构。 |
 
 ---
@@ -58,7 +58,7 @@
 1. **立刻可做**：ONNX 线程数配置化、减少重复配置加载、日志级别微调（见上「高优先级」与「低优先级」）。
 2. **短期**：为 `PgVectorStorage` 增加可选连接池或单例连接复用。
 3. **中期**：根据实际文档量与机器资源，评估「多 worker 进程分配文档」与「大批量 COPY/分批 INSERT」。
-4. **长期**：拆分 `splitter.py`、统一配置入口、补全类型与单测。
+4. **长期**：继续细化 `pipeline/` 与 `processor/` 的边界、统一配置入口、补全类型与单测。
 
 ---
 

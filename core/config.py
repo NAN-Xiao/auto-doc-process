@@ -341,9 +341,9 @@ def load_processor_config() -> dict:
     config = dict(_load_yaml("doc_splitter.yaml"))
     config["database"] = load_db_config()
 
-    # --- 路径解析：相对路径 → 绝对路径（基于 MODULE_DIR / auto-doc） ---
+    # --- 路径解析：相对路径 → 绝对路径（基于 MODULE_DIR / auto-doc-process） ---
     paths = config.get("paths", {})
-    for key in ("documents_dir", "excel_dir"):
+    for key in ("documents_dir", "processed_dir", "excel_dir"):
         raw = paths.get(key, "")
         if raw:
             p = Path(raw)

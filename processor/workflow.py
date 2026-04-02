@@ -10,7 +10,8 @@ import json
 from ..core.config import load_processor_config as load_config
 from ..core.logger import Logger
 from ..core.utils import safe_filename, atomic_write_json
-from .splitter import process_document, generate_output_path
+from .excel.metadata import ExcelMetadataExtractor
+from .splitter import process_document
 from .embedder import EmbeddingGenerator
 from .storage import PgVectorStorage
 from .quality import compute_chunk_hash, compute_document_version_hash, summarize_document_quality, summarize_batch_quality
@@ -31,7 +32,7 @@ class BatchWorkflow:
         """
         self.config = config if config is not None else load_config()
         self.use_llm_naming = use_llm_naming
-        self.embedding_generator = EmbeddingGenerator(config=self.config)
+        self.embedding_generator = None
         
         # 数据库存储
         _db_cfg = db_config or self.config.get('database', {})
@@ -42,18 +43,19 @@ class BatchWorkflow:
         
         paths_config = self.config.get('paths', {})
         self.documents_dir = Path(paths_config.get('documents_dir', './documents'))
-
-        # 优先使用独立的 processed_dir，向后兼容 processed_subdir
         processed_dir_raw = paths_config.get('processed_dir', '')
         if processed_dir_raw:
             from ..core.config import MODULE_DIR
             p = Path(processed_dir_raw)
             self.processed_dir = p if p.is_absolute() else (MODULE_DIR / p).resolve()
         else:
-            self.processed_dir = self.documents_dir / paths_config.get('processed_subdir', 'processed')
+            self.processed_dir = self.documents_dir / 'processed'
+
+        self.excel_source_dir = Path(paths_config.get('excel_dir', self.documents_dir / 'excel'))
+        self.excel_extractor = ExcelMetadataExtractor()
 
         doc_config = self.config.get('doc_splitter', {})
-        self.supported_formats = doc_config.get('supported_formats', ['.pdf', '.docx'])
+        self.supported_formats = doc_config.get('supported_formats', ['.pdf', '.docx', '.xlsx', '.xls'])
         
         Logger.separator()
         Logger.info("批量处理工具已初始化")
@@ -62,16 +64,32 @@ class BatchWorkflow:
         Logger.info(f"支持格式: {', '.join(self.supported_formats)}", indent=1)
         Logger.info(f"LLM 命名: {'启用' if self.use_llm_naming else '禁用'}", indent=1)
         Logger.separator()
+
+    def _get_embedding_generator(self) -> EmbeddingGenerator:
+        """按需初始化 embedding 生成器，避免无向量流程也加载模型。"""
+        if self.embedding_generator is None:
+            self.embedding_generator = EmbeddingGenerator(config=self.config)
+        return self.embedding_generator
     
     def scan_documents(self) -> List[Path]:
         """扫描文档目录"""
-        if not self.documents_dir.exists():
-            Logger.error(f"文档目录不存在: {self.documents_dir}")
-            return []
-        
         documents = []
-        for fmt in self.supported_formats:
-            documents.extend(self.documents_dir.glob(f"*{fmt}"))
+        doc_formats = {'.pdf', '.docx', '.doc'}
+        excel_formats = {'.xlsx', '.xls'}
+
+        if self.documents_dir.exists():
+            for fmt in self.supported_formats:
+                if fmt.lower() in doc_formats:
+                    documents.extend(self.documents_dir.glob(f"*{fmt}"))
+        else:
+            Logger.warning(f"文档目录不存在: {self.documents_dir}")
+
+        if self.excel_source_dir.exists():
+            for fmt in self.supported_formats:
+                if fmt.lower() in excel_formats:
+                    documents.extend(self.excel_source_dir.glob(f"*{fmt}"))
+        else:
+            Logger.warning(f"Excel 目录不存在: {self.excel_source_dir}")
         
         documents = sorted(documents)
         
@@ -92,6 +110,9 @@ class BatchWorkflow:
         Logger.separator()
         Logger.info(f"处理文档: {doc_path.name}")
         Logger.separator()
+
+        if doc_path.suffix.lower() in {'.xlsx', '.xls'}:
+            return self._process_excel_document(doc_path)
 
         start_time = datetime.now()
         if batch_timestamp is None:
@@ -158,7 +179,11 @@ class BatchWorkflow:
                 return result
 
             images = self._load_images(output_path)
+            source_doc_id = self._build_source_doc_id(doc_path, doc_meta)
             for chunk in chunks:
+                chunk.setdefault("metadata", {})
+                chunk["metadata"].setdefault("source_doc_id", source_doc_id)
+                chunk["metadata"].setdefault("source_hint", str((doc_meta or {}).get("source_url") or doc_path))
                 chunk["chunk_hash"] = compute_chunk_hash(chunk.get("content", ""))
             doc_version_hash = compute_document_version_hash(chunks)
 
@@ -168,10 +193,12 @@ class BatchWorkflow:
                 'timestamp': batch_timestamp,
                 'doc_info': {
                     'format': doc_info.format,
+                    'doc_type': getattr(doc_info, 'doc_type', ''),
                     'chunks_count': doc_info.total_chunks,
                     'images_count': doc_info.total_images,
                     'created_at': doc_info.created_at,
                     'doc_version_hash': doc_version_hash,
+                    'source_doc_id': source_doc_id,
                     'space_id': (doc_meta or {}).get('space_id', ''),
                     'source_url': (doc_meta or {}).get('source_url', ''),
                     'source_updated_at': (doc_meta or {}).get('source_updated_at', ''),
@@ -180,7 +207,7 @@ class BatchWorkflow:
                 'images': images
             }
 
-            chunk_count = self.embedding_generator.build_embeddings_for_document(doc_data)
+            chunk_count = self._get_embedding_generator().build_embeddings_for_document(doc_data)
 
             if chunk_count > 0:
                 result['step2_embeddings'] = {
@@ -208,6 +235,7 @@ class BatchWorkflow:
                 'space_id': _meta.get('space_id', ''),
                 'source_url': _meta.get('source_url', ''),
                 'doc_version_hash': doc_version_hash,
+                'source_doc_id': source_doc_id,
                 'source_updated_at': _meta.get('source_updated_at', ''),
             }
             result['doc_version_hash'] = doc_version_hash
@@ -260,6 +288,32 @@ class BatchWorkflow:
             import traceback
             traceback.print_exc()
             return result
+
+    def _process_excel_document(self, doc_path: Path) -> Dict[str, Any]:
+        """处理 Excel 配置表元数据。"""
+        Logger.info("步骤1：提取 Excel 元数据...")
+        result = self.excel_extractor.process_single_excel(doc_path)
+
+        if result.get('success'):
+            step = result.get('step1_split', {})
+            Logger.success("Excel 元数据提取成功")
+            Logger.info(f"输出文件: {step.get('output_path', '')}", indent=1)
+            Logger.info(f"工作表数: {step.get('extracted_sheets', 0)}", indent=1)
+            Logger.info(f"字段数: {step.get('field_count', 0)}", indent=1)
+        else:
+            Logger.error(f"Excel 处理失败: {result.get('error', '未知错误')}")
+
+        Logger.info("步骤2：跳过（Excel 元数据流程不生成 embeddings）")
+        Logger.info("步骤3：跳过（Excel 元数据流程不入库）")
+        return result
+
+    def _build_source_doc_id(self, doc_path: Path, doc_meta: Dict[str, Any] = None) -> str:
+        """构建稳定的文档来源 ID，优先使用上游来源链接。"""
+        import hashlib
+
+        source_hint = (doc_meta or {}).get("source_url") or str(doc_path)
+        normalized = source_hint.replace("\\", "/").strip().lower()
+        return hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:20]
 
     def batch_store(self, results: List[Dict[str, Any]]) -> int:
         """

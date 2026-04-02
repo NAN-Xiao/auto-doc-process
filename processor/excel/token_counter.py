@@ -95,7 +95,7 @@ if __name__ == "__main__":
         processed_base = p if p.is_absolute() else (MODULE_DIR / p).resolve()
     else:
         documents_dir = Path(paths_config.get('documents_dir', './documents'))
-        processed_base = documents_dir / paths_config.get('processed_subdir', 'processed')
+        processed_base = documents_dir / 'processed'
 
     excel_metadata_dir = processed_base / "excel"
 

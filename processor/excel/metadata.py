@@ -1,20 +1,20 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Excel 元数据提取器 - 提取配置表结构信息用于 RAG"""
+"""Excel 元数据提取器。"""
 
 import sys
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any, Optional
 import pandas as pd
-import json
 from datetime import datetime
 
 from ...core.config import load_processor_config as load_config
 from ...core.logger import Logger
+from ...core.utils import atomic_write_json
 
 
 class ExcelMetadataExtractor:
-    """Excel 元数据提取器"""
+    """Excel 元数据提取器。"""
     
     def __init__(self, 
                  desc_row: int = 0,
@@ -35,10 +35,8 @@ class ExcelMetadataExtractor:
         config = load_config()
         paths_config = config.get('paths', {})
         
-        # 从配置读取 Excel 目录
         self.excel_source_dir = Path(paths_config.get('excel_dir', './excel'))
         
-        # 输出目录：processed/excel/
         processed_dir_raw = paths_config.get('processed_dir', '')
         if processed_dir_raw:
             from ...core.config import MODULE_DIR
@@ -46,10 +44,60 @@ class ExcelMetadataExtractor:
             processed_base = p if p.is_absolute() else (MODULE_DIR / p).resolve()
         else:
             documents_dir = Path(paths_config.get('documents_dir', './documents'))
-            processed_base = documents_dir / paths_config.get('processed_subdir', 'processed')
+            processed_base = documents_dir / 'processed'
         self.output_dir = processed_base / 'excel'
-        
+
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _build_output_file(self, excel_path: Path) -> Path:
+        """返回单个 Excel 元数据输出路径。"""
+        return self.output_dir / f"{excel_path.stem}_metadata.json"
+
+    def _write_metadata_file(self, output_file: Path, payload: Dict[str, Any]) -> None:
+        """统一写 JSON，避免半写状态。"""
+        atomic_write_json(output_file, payload)
+
+    def process_single_excel(self, excel_path: Path) -> Dict[str, Any]:
+        """处理单个 Excel 文件并返回流程结果。"""
+        start_time = datetime.now()
+        result = {
+            'document': excel_path.name,
+            'doc_path': str(excel_path),
+            'started_at': start_time.isoformat(),
+            'processor': 'excel_metadata',
+            'step1_split': None,
+            'step2_embeddings': None,
+            'success': False,
+            'error': None,
+        }
+
+        if not excel_path.exists():
+            result['error'] = 'Excel 文件不存在'
+            Logger.error(f"Excel 文件不存在: {excel_path}")
+            return result
+
+        metadata = self.extract_excel_metadata(excel_path)
+        if not metadata:
+            result['error'] = 'Excel 元数据提取失败'
+            return result
+
+        output_file = self._build_output_file(excel_path)
+        self._write_metadata_file(output_file, metadata)
+
+        field_count = sum(sheet.get('field_count', 0) for sheet in metadata.get('sheets', []))
+        result['step1_split'] = {
+            'success': True,
+            'output_path': str(output_file),
+            'sheet_count': metadata.get('sheet_count', 0),
+            'extracted_sheets': metadata.get('extracted_sheets', 0),
+            'field_count': field_count,
+            'processed_at': metadata.get('extracted_at', ''),
+        }
+        result['success'] = True
+        end_time = datetime.now()
+        result['completed_at'] = end_time.isoformat()
+        result['duration_seconds'] = (end_time - start_time).total_seconds()
+        return result
     
     def extract_sheet_metadata(self, 
                                excel_path: Path, 
@@ -184,9 +232,8 @@ class ExcelMetadataExtractor:
                 success_count += 1
                 
                 # 保存单个文件的元数据
-                output_file = self.output_dir / f"{excel_path.stem}_metadata.json"
-                with open(output_file, 'w', encoding='utf-8') as f:
-                    json.dump(metadata, f, ensure_ascii=False, indent=2)
+                output_file = self._build_output_file(excel_path)
+                self._write_metadata_file(output_file, metadata)
                 Logger.info(f"已保存: {output_file.name}", indent=1)
         
         # 生成汇总报告
@@ -203,8 +250,7 @@ class ExcelMetadataExtractor:
         
         # 保存汇总文件
         summary_file = self.output_dir / 'excel_metadata_summary.json'
-        with open(summary_file, 'w', encoding='utf-8') as f:
-            json.dump(summary, f, ensure_ascii=False, indent=2)
+        self._write_metadata_file(summary_file, summary)
         
         Logger.separator()
         Logger.success("元数据提取完成")

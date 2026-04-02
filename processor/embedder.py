@@ -102,6 +102,8 @@ class EmbeddingGenerator:
         Returns:
             metadata 字典
         """
+        chunk_meta = dict(chunk_info.get('metadata', {}) or {})
+
         metadata = {
             # 基本信息
             'source': doc_data['doc_name'],
@@ -113,10 +115,12 @@ class EmbeddingGenerator:
             
             # 文档信息
             'doc_format': doc_data['doc_info'].get('format', 'Unknown'),
+            'doc_type': doc_data['doc_info'].get('doc_type', ''),
             'doc_timestamp': doc_data['timestamp'],
             'processed_at': doc_data['doc_info'].get('created_at', ''),
             'processed_batch_id': doc_data['timestamp'],
             'doc_version_hash': doc_data['doc_info'].get('doc_version_hash', ''),
+            'source_doc_id': doc_data['doc_info'].get('source_doc_id', ''),
             'space_id': doc_data['doc_info'].get('space_id', ''),
             'source_url': doc_data['doc_info'].get('source_url', ''),
             'source_updated_at': doc_data['doc_info'].get('source_updated_at', ''),
@@ -126,6 +130,14 @@ class EmbeddingGenerator:
             'image_count': 0,
             'images': [],
             'image_titles': [],
+            'content_type': chunk_meta.get('content_type', 'section'),
+            'title': chunk_meta.get('title', ''),
+            'section_path': chunk_meta.get('section_path', ''),
+            'parent_chunk_id': chunk_meta.get('parent_chunk_id', ''),
+            'table_index': chunk_meta.get('table_index', 0),
+            'table_headers': chunk_meta.get('table_headers', []),
+            'row_data': chunk_meta.get('row_data', {}),
+            'keywords': chunk_meta.get('keywords', []),
         }
 
         quality = analyze_chunk_quality(chunk_info.get('content', ''))

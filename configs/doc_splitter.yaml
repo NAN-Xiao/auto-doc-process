@@ -8,11 +8,6 @@ llm:
   api_base: "https://api.deepseek.com"             # API 地址
   model: "deepseek-chat"                           # 默认模型
 
-# 向后兼容（即将弃用，请迁移到上方 llm 配置）
-deepseek:
-  api_key: "sk-6bcfa69eced746968f1f2e7766ee7fcb"
-  default_model: "deepseek-chat"
-
 doc_splitter:
   text_splitter:
     chunk_size: 1000      # 目标块大小；有 tokenizer 时按 token 计，并自动限制在 embedding 安全上限内
@@ -51,13 +46,7 @@ doc_splitter:
     min_pattern_length: 3
     repeat_ratio_threshold: 0.6
 
-  output:
-    root_dir: "processed"         # 输出根目录
-    structure: "nested"           # nested/flat/same
-    add_timestamp: true           # 添加时间戳
-    verbose: true
-
-  supported_formats: [".pdf", ".docx"]
+  supported_formats: [".pdf", ".docx", ".xlsx", ".xls"]
 
   processing:
     skip_existing: false          # true=跳过已处理

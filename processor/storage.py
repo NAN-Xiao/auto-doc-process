@@ -28,6 +28,7 @@ from datetime import datetime
 
 import psycopg
 from pgvector.psycopg import register_vector
+from psycopg.types.json import Jsonb
 
 from ..core.config import load_processor_config as load_config
 from ..core.logger import Logger
@@ -66,14 +67,23 @@ class PgVectorStorage:
         page_number       INTEGER,
         has_images        BOOLEAN NOT NULL DEFAULT FALSE,
         image_count       INTEGER NOT NULL DEFAULT 0,
-        images_json       TEXT    DEFAULT '[]',
-        image_titles_json TEXT    DEFAULT '[]',
+        images_json       JSONB   NOT NULL DEFAULT '[]'::jsonb,
+        image_titles_json JSONB   NOT NULL DEFAULT '[]'::jsonb,
         content_quality_score DOUBLE PRECISION DEFAULT 0.0,
         is_structured_chunk BOOLEAN NOT NULL DEFAULT FALSE,
-        quality_flags_json TEXT DEFAULT '[]',
+        quality_flags_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        content_type      TEXT    NOT NULL DEFAULT 'section',
+        title             TEXT    NOT NULL DEFAULT '',
+        section_path      TEXT    NOT NULL DEFAULT '',
+        parent_chunk_id   TEXT    NOT NULL DEFAULT '',
+        table_index       INTEGER NOT NULL DEFAULT 0,
+        table_headers_json JSONB  NOT NULL DEFAULT '[]'::jsonb,
+        row_data_json     JSONB   NOT NULL DEFAULT '{}'::jsonb,
+        keywords_json     JSONB   NOT NULL DEFAULT '[]'::jsonb,
         source_file       TEXT    NOT NULL DEFAULT '',
         processed_batch_id TEXT DEFAULT '',
         doc_version_hash  TEXT DEFAULT '',
+        source_doc_id     TEXT DEFAULT '',
         source_updated_at TEXT DEFAULT '',
         embedding         vector({dim}),
         processed_at      TEXT    DEFAULT '',
@@ -87,8 +97,27 @@ class PgVectorStorage:
     CREATE INDEX IF NOT EXISTS idx_doc_chunks_chunk_id
         ON doc_chunks (chunk_id);
 
+    CREATE INDEX IF NOT EXISTS idx_doc_chunks_source_type
+        ON doc_chunks (source_doc_id, content_type);
+
+    CREATE INDEX IF NOT EXISTS idx_doc_chunks_doc_order
+        ON doc_chunks (doc_name, chunk_index);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_doc_chunks_source_chunk
+        ON doc_chunks (source_doc_id, chunk_id)
+        WHERE source_doc_id <> '';
+
     CREATE INDEX IF NOT EXISTS idx_doc_chunks_embedding
         ON doc_chunks USING hnsw (embedding vector_cosine_ops);
+
+    CREATE INDEX IF NOT EXISTS idx_doc_chunks_keywords_json
+        ON doc_chunks USING gin (keywords_json);
+
+    CREATE INDEX IF NOT EXISTS idx_doc_chunks_row_data_json
+        ON doc_chunks USING gin (row_data_json);
+
+    CREATE INDEX IF NOT EXISTS idx_doc_chunks_images_json
+        ON doc_chunks USING gin (images_json);
     """
 
     # 增量 DDL：为已有表添加新列（幂等）
@@ -118,7 +147,7 @@ class PgVectorStorage:
             SELECT 1 FROM information_schema.columns
             WHERE table_name = 'doc_chunks' AND column_name = 'image_titles_json'
         ) THEN
-            ALTER TABLE doc_chunks ADD COLUMN image_titles_json TEXT DEFAULT '[]';
+            ALTER TABLE doc_chunks ADD COLUMN image_titles_json JSONB NOT NULL DEFAULT '[]'::jsonb;
         END IF;
         IF NOT EXISTS (
             SELECT 1 FROM information_schema.columns
@@ -143,7 +172,7 @@ class PgVectorStorage:
             SELECT 1 FROM information_schema.columns
             WHERE table_name = 'doc_chunks' AND column_name = 'quality_flags_json'
         ) THEN
-            ALTER TABLE doc_chunks ADD COLUMN quality_flags_json TEXT DEFAULT '[]';
+            ALTER TABLE doc_chunks ADD COLUMN quality_flags_json JSONB NOT NULL DEFAULT '[]'::jsonb;
         END IF;
         IF NOT EXISTS (
             SELECT 1 FROM information_schema.columns
@@ -160,9 +189,150 @@ class PgVectorStorage:
         END IF;
         IF NOT EXISTS (
             SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'source_doc_id'
+        ) THEN
+            ALTER TABLE doc_chunks ADD COLUMN source_doc_id TEXT DEFAULT '';
+            CREATE INDEX IF NOT EXISTS idx_doc_chunks_source_doc_id ON doc_chunks (source_doc_id);
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
             WHERE table_name = 'doc_chunks' AND column_name = 'source_updated_at'
         ) THEN
             ALTER TABLE doc_chunks ADD COLUMN source_updated_at TEXT DEFAULT '';
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'content_type'
+        ) THEN
+            ALTER TABLE doc_chunks ADD COLUMN content_type TEXT NOT NULL DEFAULT 'section';
+            CREATE INDEX IF NOT EXISTS idx_doc_chunks_content_type ON doc_chunks (content_type);
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'title'
+        ) THEN
+            ALTER TABLE doc_chunks ADD COLUMN title TEXT NOT NULL DEFAULT '';
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'section_path'
+        ) THEN
+            ALTER TABLE doc_chunks ADD COLUMN section_path TEXT NOT NULL DEFAULT '';
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'parent_chunk_id'
+        ) THEN
+            ALTER TABLE doc_chunks ADD COLUMN parent_chunk_id TEXT NOT NULL DEFAULT '';
+            CREATE INDEX IF NOT EXISTS idx_doc_chunks_parent_chunk_id ON doc_chunks (parent_chunk_id);
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'table_index'
+        ) THEN
+            ALTER TABLE doc_chunks ADD COLUMN table_index INTEGER NOT NULL DEFAULT 0;
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'table_headers_json'
+        ) THEN
+            ALTER TABLE doc_chunks ADD COLUMN table_headers_json JSONB NOT NULL DEFAULT '[]'::jsonb;
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'row_data_json'
+        ) THEN
+            ALTER TABLE doc_chunks ADD COLUMN row_data_json JSONB NOT NULL DEFAULT '{}'::jsonb;
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'keywords_json'
+        ) THEN
+            ALTER TABLE doc_chunks ADD COLUMN keywords_json JSONB NOT NULL DEFAULT '[]'::jsonb;
+        END IF;
+
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'images_json' AND data_type <> 'jsonb'
+        ) THEN
+            ALTER TABLE doc_chunks
+                ALTER COLUMN images_json TYPE JSONB
+                USING CASE
+                    WHEN images_json IS NULL OR images_json = '' THEN '[]'::jsonb
+                    ELSE images_json::jsonb
+                END;
+            ALTER TABLE doc_chunks ALTER COLUMN images_json SET DEFAULT '[]'::jsonb;
+            ALTER TABLE doc_chunks ALTER COLUMN images_json SET NOT NULL;
+        END IF;
+
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'image_titles_json' AND data_type <> 'jsonb'
+        ) THEN
+            ALTER TABLE doc_chunks
+                ALTER COLUMN image_titles_json TYPE JSONB
+                USING CASE
+                    WHEN image_titles_json IS NULL OR image_titles_json = '' THEN '[]'::jsonb
+                    ELSE image_titles_json::jsonb
+                END;
+            ALTER TABLE doc_chunks ALTER COLUMN image_titles_json SET DEFAULT '[]'::jsonb;
+            ALTER TABLE doc_chunks ALTER COLUMN image_titles_json SET NOT NULL;
+        END IF;
+
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'quality_flags_json' AND data_type <> 'jsonb'
+        ) THEN
+            ALTER TABLE doc_chunks
+                ALTER COLUMN quality_flags_json TYPE JSONB
+                USING CASE
+                    WHEN quality_flags_json IS NULL OR quality_flags_json = '' THEN '[]'::jsonb
+                    ELSE quality_flags_json::jsonb
+                END;
+            ALTER TABLE doc_chunks ALTER COLUMN quality_flags_json SET DEFAULT '[]'::jsonb;
+            ALTER TABLE doc_chunks ALTER COLUMN quality_flags_json SET NOT NULL;
+        END IF;
+
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'table_headers_json' AND data_type <> 'jsonb'
+        ) THEN
+            ALTER TABLE doc_chunks
+                ALTER COLUMN table_headers_json TYPE JSONB
+                USING CASE
+                    WHEN table_headers_json IS NULL OR table_headers_json = '' THEN '[]'::jsonb
+                    ELSE table_headers_json::jsonb
+                END;
+            ALTER TABLE doc_chunks ALTER COLUMN table_headers_json SET DEFAULT '[]'::jsonb;
+            ALTER TABLE doc_chunks ALTER COLUMN table_headers_json SET NOT NULL;
+        END IF;
+
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'row_data_json' AND data_type <> 'jsonb'
+        ) THEN
+            ALTER TABLE doc_chunks
+                ALTER COLUMN row_data_json TYPE JSONB
+                USING CASE
+                    WHEN row_data_json IS NULL OR row_data_json = '' THEN '{}'::jsonb
+                    ELSE row_data_json::jsonb
+                END;
+            ALTER TABLE doc_chunks ALTER COLUMN row_data_json SET DEFAULT '{}'::jsonb;
+            ALTER TABLE doc_chunks ALTER COLUMN row_data_json SET NOT NULL;
+        END IF;
+
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'doc_chunks' AND column_name = 'keywords_json' AND data_type <> 'jsonb'
+        ) THEN
+            ALTER TABLE doc_chunks
+                ALTER COLUMN keywords_json TYPE JSONB
+                USING CASE
+                    WHEN keywords_json IS NULL OR keywords_json = '' THEN '[]'::jsonb
+                    ELSE keywords_json::jsonb
+                END;
+            ALTER TABLE doc_chunks ALTER COLUMN keywords_json SET DEFAULT '[]'::jsonb;
+            ALTER TABLE doc_chunks ALTER COLUMN keywords_json SET NOT NULL;
         END IF;
     END
     $$;
@@ -182,6 +352,33 @@ class PgVectorStorage:
         END IF;
     END
     $$;
+    """
+
+    DDL_EXTRA_INDEXES = """
+    CREATE INDEX IF NOT EXISTS idx_doc_chunks_source_type
+        ON doc_chunks (source_doc_id, content_type);
+
+    CREATE INDEX IF NOT EXISTS idx_doc_chunks_doc_order
+        ON doc_chunks (doc_name, chunk_index);
+
+    CREATE INDEX IF NOT EXISTS idx_doc_chunks_space_type
+        ON doc_chunks (space_id, content_type);
+
+    CREATE INDEX IF NOT EXISTS idx_doc_chunks_processed_batch
+        ON doc_chunks (processed_batch_id);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_doc_chunks_source_chunk
+        ON doc_chunks (source_doc_id, chunk_id)
+        WHERE source_doc_id <> '';
+
+    CREATE INDEX IF NOT EXISTS idx_doc_chunks_keywords_json
+        ON doc_chunks USING gin (keywords_json);
+
+    CREATE INDEX IF NOT EXISTS idx_doc_chunks_row_data_json
+        ON doc_chunks USING gin (row_data_json);
+
+    CREATE INDEX IF NOT EXISTS idx_doc_chunks_images_json
+        ON doc_chunks USING gin (images_json);
     """
 
     def __init__(self, db_config: dict = None, vector_dim: int = 512):
@@ -216,6 +413,8 @@ class PgVectorStorage:
             dbname=self.db_config.get("database", ""),
             user=self.db_config.get("user", ""),
             password=self.db_config.get("password", ""),
+            connect_timeout=int(self.db_config.get("connect_timeout", 10)),
+            application_name=self.db_config.get("application_name", "auto-doc-process"),
             autocommit=autocommit,
         )
         register_vector(conn)
@@ -233,6 +432,8 @@ class PgVectorStorage:
                 cur.execute(self.DDL_ADD_SOURCE_COLUMNS)
                 # 全文检索索引（支持 BM25 关键词匹配）
                 cur.execute(self.DDL_FULLTEXT_INDEX)
+                # 额外组合索引和 JSONB GIN 索引
+                cur.execute(self.DDL_EXTRA_INDEXES)
             Logger.info("数据库表 doc_chunks 就绪")
         finally:
             conn.close()
@@ -297,14 +498,23 @@ class PgVectorStorage:
                 "page_number": raw_meta.get("page_number"),
                 "has_images": raw_meta.get("has_images", False),
                 "image_count": raw_meta.get("image_count", 0),
-                "images_json": json.dumps(images_list, ensure_ascii=False) if images_list else "[]",
-                "image_titles_json": json.dumps(image_titles, ensure_ascii=False) if image_titles else "[]",
+                "images_json": images_list or [],
+                "image_titles_json": image_titles or [],
                 "content_quality_score": raw_meta.get("content_quality_score", 0.0),
                 "is_structured_chunk": raw_meta.get("is_structured_chunk", False),
-                "quality_flags_json": json.dumps(raw_meta.get("quality_flags", []), ensure_ascii=False),
+                "quality_flags_json": raw_meta.get("quality_flags", []),
+                "content_type": raw_meta.get("content_type", "section"),
+                "title": raw_meta.get("title", ""),
+                "section_path": raw_meta.get("section_path", ""),
+                "parent_chunk_id": raw_meta.get("parent_chunk_id", ""),
+                "table_index": raw_meta.get("table_index", 0),
+                "table_headers_json": raw_meta.get("table_headers", []),
+                "row_data_json": raw_meta.get("row_data", {}),
+                "keywords_json": raw_meta.get("keywords", []),
                 "source_file": raw_meta.get("source", ""),
                 "processed_batch_id": raw_meta.get("processed_batch_id", dir_info["timestamp"]),
                 "doc_version_hash": raw_meta.get("doc_version_hash", dir_info.get("doc_version_hash", "")),
+                "source_doc_id": raw_meta.get("source_doc_id", dir_info.get("source_doc_id", "")),
                 "source_updated_at": raw_meta.get("source_updated_at", dir_info.get("source_updated_at", "")),
                 "space_id": dir_info.get("space_id", ""),
                 "source_url": dir_info.get("source_url", ""),
@@ -329,19 +539,59 @@ class PgVectorStorage:
         finally:
             conn.close()
 
+    def _get_existing_doc_snapshot(self, cur, source_doc_id: str = "", doc_name: str = "") -> Optional[Dict[str, Any]]:
+        """读取库中已有文档的版本快照，用于跳过未变化重写。"""
+        if source_doc_id:
+            cur.execute(
+                """
+                SELECT source_doc_id, doc_name, doc_version_hash, COUNT(*)::int AS chunk_count
+                FROM doc_chunks
+                WHERE source_doc_id = %s
+                GROUP BY source_doc_id, doc_name, doc_version_hash
+                ORDER BY chunk_count DESC
+                LIMIT 1
+                """,
+                (source_doc_id,),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT source_doc_id, doc_name, doc_version_hash, COUNT(*)::int AS chunk_count
+                FROM doc_chunks
+                WHERE doc_name = %s
+                GROUP BY source_doc_id, doc_name, doc_version_hash
+                ORDER BY chunk_count DESC
+                LIMIT 1
+                """,
+                (doc_name,),
+            )
+
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "source_doc_id": row[0] or "",
+            "doc_name": row[1] or "",
+            "doc_version_hash": row[2] or "",
+            "chunk_count": int(row[3] or 0),
+        }
+
     # -------------------- 写入 --------------------
 
-    def _delete_doc(self, cur, doc_name: str, timestamp: str = None):
+    def _delete_doc(self, cur, doc_name: str, timestamp: str = None, source_doc_id: str = ""):
         """
         删除指定文档的旧数据
 
-        行为：按 doc_name 删除该文档的 **所有** 旧版本 chunks，
-        确保同一文档不会因多次处理而产生重复数据。
+        行为：优先按 source_doc_id 删除该文档的 **所有** 旧版本 chunks，
+        确保重命名后仍能清理同一来源文档；没有 source_doc_id 时回退到 doc_name。
         """
-        cur.execute(
-            "DELETE FROM doc_chunks WHERE doc_name = %s",
-            (doc_name,),
-        )
+        if source_doc_id:
+            cur.execute(
+                "DELETE FROM doc_chunks WHERE source_doc_id = %s",
+                (source_doc_id,),
+            )
+            return
+        cur.execute("DELETE FROM doc_chunks WHERE doc_name = %s", (doc_name,))
 
     def store_document(self, dir_info: Dict[str, Any]) -> int:
         """
@@ -379,7 +629,24 @@ class PgVectorStorage:
                         "SELECT pg_advisory_xact_lock(%s)",
                         (self.ADVISORY_LOCK_DOC_CHUNKS,),
                     )
-                    self._delete_doc(cur, dir_info["doc_name"], dir_info["timestamp"])
+                    existing = self._get_existing_doc_snapshot(
+                        cur,
+                        dir_info.get("source_doc_id", ""),
+                        dir_info["doc_name"],
+                    )
+                    if existing and existing.get("doc_version_hash") == dir_info.get("doc_version_hash", ""):
+                        Logger.info(
+                            f"检测到文档版本未变化，跳过重写: {dir_info['doc_name']} "
+                            f"(source_doc_id={existing.get('source_doc_id') or dir_info.get('source_doc_id', '')})",
+                            indent=1,
+                        )
+                        return existing.get("chunk_count", len(chunks))
+                    self._delete_doc(
+                        cur,
+                        dir_info["doc_name"],
+                        dir_info["timestamp"],
+                        dir_info.get("source_doc_id", ""),
+                    )
                     self._insert_chunks(cur, chunks, now)
 
             Logger.success(f"成功存储 {len(chunks)} chunks", indent=1)
@@ -442,6 +709,7 @@ class PgVectorStorage:
         now = datetime.now()
         conn = self._get_conn()
         try:
+            stored_docs = 0
             with conn.transaction():
                 with conn.cursor() as cur:
                     # 获取 advisory lock（事务级排他锁）
@@ -451,12 +719,29 @@ class PgVectorStorage:
                     )
 
                     for di, chunks in all_doc_chunks:
-                        self._delete_doc(cur, di["doc_name"], di["timestamp"])
+                        existing = self._get_existing_doc_snapshot(
+                            cur,
+                            di.get("source_doc_id", ""),
+                            di["doc_name"],
+                        )
+                        if existing and existing.get("doc_version_hash") == di.get("doc_version_hash", ""):
+                            Logger.info(
+                                f"  ↷ {di['doc_name']}: 版本未变化，跳过重写",
+                                indent=1,
+                            )
+                            continue
+                        self._delete_doc(
+                            cur,
+                            di["doc_name"],
+                            di["timestamp"],
+                            di.get("source_doc_id", ""),
+                        )
                         self._insert_chunks(cur, chunks, now)
                         Logger.info(f"  ✓ {di['doc_name']}: {len(chunks)} chunks", indent=1)
+                        stored_docs += 1
 
-            Logger.success(f"批量入库成功: {len(all_doc_chunks)} 个文档, {total_chunks} 个 chunks")
-            return len(all_doc_chunks)
+            Logger.success(f"批量入库成功: {stored_docs} 个文档, {total_chunks} 个 chunks")
+            return stored_docs
 
         except Exception as e:
             Logger.error(f"批量入库失败（已全部回滚）: {e}")
@@ -475,10 +760,11 @@ class PgVectorStorage:
                 (doc_name, doc_format, doc_timestamp, chunk_id, chunk_index,
                  chunk_text, char_count, chunk_token_count, chunk_hash, page_number, has_images, image_count,
                  images_json, image_titles_json, content_quality_score, is_structured_chunk, quality_flags_json,
-                 source_file, processed_batch_id, doc_version_hash, source_updated_at, space_id, source_url,
+                 content_type, title, section_path, parent_chunk_id, table_index, table_headers_json, row_data_json, keywords_json,
+                 source_file, processed_batch_id, doc_version_hash, source_doc_id, source_updated_at, space_id, source_url,
                  embedding, processed_at,
                  created_at, updated_at)
-            VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s,%s,%s,%s, %s,%s,%s,%s,%s,%s, %s,%s,%s,%s,%s, %s,%s, %s,%s)
+            VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s,%s,%s,%s, %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, %s,%s,%s,%s,%s,%s, %s,%s, %s,%s)
         """
         params = [
             (
@@ -486,9 +772,12 @@ class PgVectorStorage:
                 c["chunk_id"], c["chunk_index"],
                 c["chunk_text"], c["char_count"], c["chunk_token_count"], c["chunk_hash"], c["page_number"],
                 c["has_images"], c["image_count"],
-                c["images_json"], c["image_titles_json"], c["content_quality_score"],
-                c["is_structured_chunk"], c["quality_flags_json"], c["source_file"],
-                c["processed_batch_id"], c["doc_version_hash"], c["source_updated_at"],
+                Jsonb(c["images_json"]), Jsonb(c["image_titles_json"]), c["content_quality_score"],
+                c["is_structured_chunk"], Jsonb(c["quality_flags_json"]),
+                c["content_type"], c["title"], c["section_path"], c["parent_chunk_id"],
+                c["table_index"], Jsonb(c["table_headers_json"]), Jsonb(c["row_data_json"]), Jsonb(c["keywords_json"]),
+                c["source_file"],
+                c["processed_batch_id"], c["doc_version_hash"], c["source_doc_id"], c["source_updated_at"],
                 c["space_id"], c["source_url"],
                 c["embedding"], c["processed_at"],
                 now, now,

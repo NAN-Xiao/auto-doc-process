@@ -1,6 +1,15 @@
 # 飞书文档自动同步工具
 
-**项目定位**：本工程仅做**预处理管线**（下载 → 拆分 → 向量化 → 入库 → 图谱），**不做召回/检索**。下游 RAG 或检索服务另行对接 pgvector / 图谱文件。重点可放在**预处理质量**的评估与调优（见 [预处理质量说明](PREPROCESSING_QUALITY.md)）。
+**项目定位**：本工程仅做**预处理管线**（下载 → 拆分 → 向量化 → 入库 → 图谱），**不做召回/检索**。下游 RAG 或检索服务另行对接 pgvector / 图谱文件。重点可放在**预处理质量**的评估与调优（见 [预处理质量说明](PREPROCESSING_QUALITY.md)），以及按 [RAG 接入说明](RAG_INTEGRATION.md) 读取结构化 chunk 和 metadata。
+
+文档导航见 [docs/README.md](docs/README.md)。
+
+当前工程已经按“编排层 / 能力层”做了第一轮整理：
+
+- `pipeline/`：预处理工作流编排、阶段调度、重置与批量入口
+- `processor/`：文档处理能力，包括 splitter、embedding、存储、质量分析
+- `feishu/`：上游飞书同步与导出
+- `core/`：配置、日志、通用工具
 
 ---
 
@@ -45,8 +54,8 @@ feishu:
     type_format_map:            # 文档类型 → 导出格式
       doc: "docx"
       docx: "docx"
-      # sheet: "xlsx"           # 取消注释可导出表格
-      # bitable: "xlsx"
+      sheet: "xlsx"
+      bitable: "xlsx"
     skip_types: ["mindnote", "file", "slides", "catalog"]
 
   schedule:
@@ -69,6 +78,8 @@ database:
   database: ""                  # ★ 必填 - 数据库名
   user: postgres                # 用户名
   password: ""                  # ★ 必填 - 密码
+  connect_timeout: 10           # 连接超时（秒）
+  application_name: "auto-doc-process"  # 连接在 PG 中显示的应用名
 ```
 
 ---
@@ -94,6 +105,11 @@ doc_splitter:
   processing:
     skip_existing: false        # true=跳过已处理的文档
     continue_on_error: true     # true=单文档出错不中断整体
+
+  supported_formats: [".pdf", ".docx", ".xlsx", ".xls"]
+
+  retrieval:
+    table_row_window: 1         # 表格行块每个 chunk 包含几行，默认 1 行更利于精确召回
 
 # ── 路径配置（相对于 auto-doc-process/，../../ = 根目录） ──
 paths:
@@ -158,7 +174,7 @@ lightrag:
 ```
 start.bat                            全流程（下载→处理→入库→图谱）
 start.bat --step download            只下载
-start.bat --step process             只处理
+start.bat --step process             只处理（文档拆分/向量化 + Excel 元数据）
 start.bat --step store               只入库
 start.bat --step graph               只构建图谱
 start.bat --step download,process    组合执行
@@ -182,10 +198,10 @@ start.bat reset                      清理所有产物
 
 ```
 download  →  process  →  store  →  graph
- 飞书下载     拆分+向量化   pgvector入库   LightRAG图谱
+ 飞书下载     文档拆分+向量化+Excel元数据   pgvector入库   LightRAG图谱
 ```
 
-- **默认增量**：只处理新增/修改的文档
+- **默认增量**：飞书文档按 manifest 增量处理；`excel_dir` 下的 Excel 会在 `process` 阶段统一重新生成 metadata
 - **`--full`**：忽略增量记录，重新处理全部
 - **`--reset-db`**：清空数据库后全量重建
 
@@ -231,12 +247,25 @@ download  →  process  →  store  →  graph
 下游 RAG 可优先消费 `doc_chunks` 和 `lightrag_workspace/`：
 
 - `doc_chunks.chunk_text`：主检索文本
+- `doc_chunks.content_type`：区分 `section` / `table_summary` / `table_row`
+- `doc_chunks.doc_type`：文档类型画像，区分 `article` / `spec_mixed` / `table_heavy` / `image_heavy`
+- `doc_chunks.title` / `section_path`：章节与主题定位
+- `doc_chunks.parent_chunk_id`：子块回查父块（当前主要用于表格行 → 表格摘要）
+- `doc_chunks.source_doc_id`：稳定文档来源 ID，适合增量同步与跨批次对齐
+- `doc_chunks.table_headers_json` / `row_data_json`：`JSONB` 结构化表格字段，适合过滤和精确召回
+- `doc_chunks.keywords_json`：`JSONB` 关键词数组，适合过滤和 rerank
 - `doc_chunks.doc_name` / `source_url` / `chunk_index`：溯源定位
-- `doc_chunks.image_titles_json` / `has_images`：图文增强
-- `doc_chunks.content_quality_score` / `quality_flags_json`：过滤低质量块
+- `doc_chunks.image_titles_json` / `has_images`：`JSONB` 图文增强信息
+- `doc_chunks.content_quality_score` / `quality_flags_json`：质量分和 `JSONB` 标记，可用于低质量过滤
 - `doc_chunks.doc_version_hash` / `processed_batch_id`：版本比对
 - `lightrag_workspace/.ready`：工作区完成信号
 - `lightrag_workspace/_workspace_manifest.json`：工作区批次与版本契约
+
+数据库入库行为：
+- 优先按 `source_doc_id` 清理旧版本，避免文档重命名后残留脏数据
+- 当库中 `doc_version_hash` 与本次一致时，自动跳过未变化文档的重复写入
+
+推荐接法见 [RAG_INTEGRATION.md](RAG_INTEGRATION.md)。
 
 ---
 
