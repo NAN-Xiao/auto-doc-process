@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
 飞书文档自动处理管线
@@ -264,15 +264,13 @@ def _collect_items_to_process(config: dict, download_result: dict,
     proc_config = load_processor_config()
     supported_formats = {
         str(fmt).lower()
-        for fmt in proc_config.get("doc_splitter", {}).get("supported_formats", [".pdf", ".docx", ".xlsx", ".xls"])
+        for fmt in proc_config.get("doc_splitter", {}).get("supported_formats", [".pdf", ".docx"])
     }
     valid = []
     for item in items:
         fp = item.get("path", "")
         if fp and Path(fp).exists() and Path(fp).suffix.lower() in supported_formats:
             valid.append(item)
-
-    valid.extend(_collect_excel_items(proc_config))
 
     deduped = []
     seen_paths = set()
@@ -283,24 +281,6 @@ def _collect_items_to_process(config: dict, download_result: dict,
         seen_paths.add(path_key)
         deduped.append(item)
     return deduped
-
-
-def _collect_excel_items(proc_config: dict) -> list:
-    """从 excel_dir 收集 Excel 元数据处理任务。"""
-    excel_dir = Path(proc_config.get("paths", {}).get("excel_dir", ""))
-    if not excel_dir.exists():
-        return []
-
-    items = []
-    for pattern in ("*.xlsx", "*.xls"):
-        for file_path in sorted(excel_dir.glob(pattern)):
-            if not file_path.is_file():
-                continue
-            items.append({
-                "path": str(file_path),
-                "entry": {"space_id": "", "url": "", "obj_edit_time": ""},
-            })
-    return items
 
 
 def _run_process_with_isolation(items: list, batch_timestamp: str,

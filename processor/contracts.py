@@ -70,6 +70,7 @@ class ImageInfo:
     smart_filename: str
     context_segments_before: Optional[List[ContextSegment]] = None
     context_segments_after: Optional[List[ContextSegment]] = None
+    description: str = ""
 
 
 @dataclass

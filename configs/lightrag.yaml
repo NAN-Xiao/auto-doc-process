@@ -1,23 +1,24 @@
 # LightRAG 知识图谱配置
+# LLM (api_key / api_base / model) 和 embedding.model 统一由 doc_splitter.yaml 提供，
+# 此处仅声明图谱特有的覆盖参数；如需单独指定可取消注释。
 
 lightrag:
   # 图谱总开关（false = 跳过阶段4图谱构建）
   enabled: true
 
   # 工作目录（LightRAG 的缓存和中间数据，放在 processed/ 内）
-  working_dir: "../../processed/lightrag_workspace"
+  working_dir: "../processed/lightrag_workspace"
 
   llm:
-    provider: "deepseek"
-    api_base: "https://api.deepseek.com"
-    model: "deepseek-chat"
+    provider: "openai_compatible"
+    # api_base / model / api_key → 继承 doc_splitter.yaml 的 llm 配置
     max_async: 12             # 最大并发请求
     max_token_size: 32768
-    timeout: 180
+    timeout: 600
 
   embedding:
     provider: "local"
-    model: "BAAI/bge-small-zh-v1.5"
+    # model → 继承 doc_splitter.yaml 的 embedding.model
     dim: 512
     max_token_size: 512
     batch_num: 10

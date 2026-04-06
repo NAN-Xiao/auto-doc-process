@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """Word 文档拆分实现。"""
 
@@ -404,16 +404,19 @@ class WordSplitter(DocumentSplitter):
                     image_filename = Path(file_info.filename).name
                     image_ext = Path(image_filename).suffix
                     
-                    # 生成智能图片名称（使用 LLM 或简单算法）
                     if self.use_llm_naming and self.llm:
-                        smart_name = generate_smart_image_name_with_llm(
+                        result = generate_smart_image_name_with_llm(
                             image_info.context_before,
                             image_info.context_after,
                             max_length=self.image_max_length,
                             llm=self.llm,
                             context_segments_before=image_info.context_segments_before,
-                            context_segments_after=image_info.context_segments_after
+                            context_segments_after=image_info.context_segments_after,
+                            image_data=image_data,
+                            original_filename=image_filename,
                         )
+                        smart_name, description = result if isinstance(result, tuple) else (result, "")
+                        image_info.description = description
                     else:
                         smart_name = generate_smart_image_name_simple(
                             image_info.context_before,
@@ -421,7 +424,6 @@ class WordSplitter(DocumentSplitter):
                             max_length=self.image_max_length
                         )
                     
-                    # 更新图片信息
                     image_info.smart_filename = f"{smart_name}_{idx + 1:03d}{image_ext}"
                     
                     # 保存图片（使用智能命名）
@@ -448,6 +450,7 @@ class WordSplitter(DocumentSplitter):
                     "image_index": info.image_index,
                     "smart_filename": info.smart_filename,
                     "original_filename": info.original_filename,
+                    "description": getattr(info, 'description', ''),
                     "context_before": info.context_before[:100],
                     "context_after": info.context_after[:100],
                 }

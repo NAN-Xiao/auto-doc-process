@@ -6,6 +6,7 @@
 提供:
   - 路径常量 (MODULE_DIR, PROJECT_ROOT, CONFIGS_DIR)
   - 日志系统 (setup_logging / log)
+  - 路径解析 (resolve_app_path)
   - load_feishu_config()     → 飞书凭证
   - load_db_config()         → 数据库配置
   - load_full_config()       → 飞书下载管线完整配置
@@ -36,15 +37,46 @@ MODULE_DIR = _this_dir.parent.resolve()   # core/ → auto-doc-process/
 PROJECT_ROOT = MODULE_DIR.parent
 CONFIGS_DIR = MODULE_DIR / "configs"
 
+
+def _detect_runtime_base_dir() -> Path:
+    """
+    解析运行时相对路径基准目录。
+
+    - 源码运行：相对 auto-doc-process/
+    - dist 运行：相对 dist/
+    """
+    candidate = MODULE_DIR.parent
+    if (candidate / "start.bat").exists() and (candidate / "install.bat").exists():
+        return candidate.resolve()
+    return MODULE_DIR
+
+
+APP_BASE_DIR = _detect_runtime_base_dir()
+
 # 运行时数据目录（放在项目父目录，与文档同级，避免混入项目源码）
 RUNTIME_DIR = PROJECT_ROOT / "_runtime"
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 
 # 默认路径（可被配置覆盖）
 DEFAULT_LOG_DIR = RUNTIME_DIR / "logs"
-DEFAULT_EXPORT_DIR = PROJECT_ROOT / "feishu_exports"
 DEFAULT_MANIFEST_PATH = RUNTIME_DIR / "manifest.json"
 DEFAULT_LOCK_PATH = RUNTIME_DIR / ".lock"
+
+
+def resolve_app_path(raw_path: str | Path) -> Path:
+    """将配置中的相对路径解析为绝对路径。"""
+    path = Path(raw_path)
+    if path.is_absolute():
+        return path
+    return (APP_BASE_DIR / path).resolve()
+
+
+def resolve_module_path(raw_path: str | Path) -> Path:
+    """将相对路径解析为应用包目录下的路径。"""
+    path = Path(raw_path)
+    if path.is_absolute():
+        return path
+    return (MODULE_DIR / path).resolve()
 
 
 # ==================== 日志 ====================
@@ -246,14 +278,19 @@ def load_full_config(config_path: str = None) -> dict:
     manifest_cfg = feishu.get("manifest", {})
     lock_cfg = feishu.get("lock", {})
 
-    # 输出目录（相对路径基于 MODULE_DIR / auto-doc）
+    # 输出目录：优先 feishu.yaml 的 output_dir，否则复用 doc_splitter.yaml 的 documents_dir
     output_dir_raw = feishu.get("output_dir", "")
     if output_dir_raw:
-        output_dir = Path(output_dir_raw)
-        if not output_dir.is_absolute():
-            output_dir = (MODULE_DIR / output_dir).resolve()
+        output_dir = resolve_app_path(output_dir_raw)
     else:
-        output_dir = DEFAULT_EXPORT_DIR
+        proc_cfg = load_processor_config()
+        docs_dir = proc_cfg.get("paths", {}).get("documents_dir", "")
+        if not docs_dir:
+            raise ValueError(
+                "未配置文档目录：请在 doc_splitter.yaml 设置 paths.documents_dir "
+                "或在 feishu.yaml 设置 output_dir"
+            )
+        output_dir = Path(docs_dir)
 
     # 日志目录
     log_dir_raw = log_cfg.get("dir", "")
@@ -341,24 +378,20 @@ def load_processor_config() -> dict:
     config = dict(_load_yaml("doc_splitter.yaml"))
     config["database"] = load_db_config()
 
-    # --- 路径解析：相对路径 → 绝对路径（基于 MODULE_DIR / auto-doc-process） ---
+    # --- 路径解析：相对路径 → 绝对路径（源码相对 auto-doc-process/，dist 相对 dist/） ---
     paths = config.get("paths", {})
     for key in ("documents_dir", "processed_dir", "excel_dir"):
         raw = paths.get(key, "")
         if raw:
-            p = Path(raw)
-            if not p.is_absolute():
-                paths[key] = str((MODULE_DIR / p).resolve())
+            paths[key] = str(resolve_app_path(raw))
     config["paths"] = paths
 
-    # embedding 模型缓存目录
+    # embedding 模型缓存目录属于应用资源，保持相对 auto-doc-process/ 解析
     emb = config.get("embedding", {})
     hf = emb.get("huggingface", {})
     cache = hf.get("cache_folder", "")
     if cache:
-        p = Path(cache)
-        if not p.is_absolute():
-            hf["cache_folder"] = str((MODULE_DIR / p).resolve())
+        hf["cache_folder"] = str(resolve_module_path(cache))
         emb["huggingface"] = hf
         config["embedding"] = emb
 

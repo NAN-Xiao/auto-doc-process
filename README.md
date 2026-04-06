@@ -111,7 +111,9 @@ doc_splitter:
   retrieval:
     table_row_window: 1         # 表格行块每个 chunk 包含几行，默认 1 行更利于精确召回
 
-# ── 路径配置（相对于 auto-doc-process/，../../ = 根目录） ──
+# ── 路径配置 ──
+# 源码运行时相对于 auto-doc-process/
+# dist 运行时相对于 dist/
 paths:
   documents_dir: "../../documents"        # 源文档目录（与 feishu.yaml output_dir 一致）
   processed_dir: "../../processed"        # 处理产物目录
@@ -209,7 +211,12 @@ download  →  process  →  store  →  graph
 
 ## 路径配置
 
-所有路径相对于 `dist/auto-doc-process/`，`../../` 即根目录：
+相对路径规则：
+
+- 源码运行：相对于 `auto-doc-process/`
+- dist 运行：相对于 `dist/`
+
+当前默认配置在 dist 运行时会落到 `dist` 的父目录，例如 `../processed` → `<dist父目录>/processed`
 
 | 配置文件 | 参数 | 默认值 | 指向 |
 |----------|------|--------|------|

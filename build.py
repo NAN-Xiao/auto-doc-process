@@ -102,9 +102,14 @@ def build(include_models: bool = True, include_venv: bool = False,
 
     # ─── 2. 复制项目到 dist ──────────────────────────────────
     ignore_list = [
+        # 开发 / 运行时目录
         "venv", "__pycache__", "*.pyc", "*.pyo",
         "build.py", "dist", ".git", ".gitignore",
         "*.log", ".feishu_export*", "_runtime",
+        # 文档（运行不需要）
+        "docs", "*.md",
+        # 周报等杂项
+        "周报*",
     ]
     if not include_models:
         ignore_list.append("models")
@@ -113,7 +118,10 @@ def build(include_models: bool = True, include_venv: bool = False,
         src_dir, dist_dir,
         ignore=shutil.ignore_patterns(*ignore_list),
     )
-    print("[复制] 项目文件已复制")
+    print("[复制] 项目核心文件已复制")
+
+    # 只保留 requirements.txt（被 *.md 误排除时不受影响，它不是 .md）
+    # 保留 run.py 入口
 
     # 删除 tools/ 中的开发专用脚本，保留运行时所需脚本
     tools_dist = dist_dir / "tools"
@@ -124,26 +132,34 @@ def build(include_models: bool = True, include_venv: bool = False,
                 f.unlink()
         print("[清理] 已移除开发专用脚本")
 
-    # --slim：仅保留 ONNX 模型，删除 HuggingFace 原始模型
-    if slim and include_models:
+    # models/ 只保留 onnx/，删除 HuggingFace 缓存（体积大且有 ONNX 就不需要）
+    if include_models:
         models_dist = dist_dir / "models"
         onnx_dir = models_dist / "onnx"
-        if onnx_dir.exists():
-            # 删除非 onnx 的目录（HuggingFace 缓存）
+        if models_dist.exists() and onnx_dir.exists():
             for item in models_dist.iterdir():
                 if item.name != "onnx":
                     if item.is_dir():
                         shutil.rmtree(item)
                     else:
                         item.unlink()
-            print("[瘦身] 已移除 HuggingFace 原始模型，仅保留 ONNX")
-        else:
+            print("[模型] 仅保留 ONNX 推理模型，已清理 HuggingFace 缓存")
+        elif models_dist.exists() and not onnx_dir.exists():
             print("[警告] ONNX 模型不存在 (models/onnx/)，请先运行 tools/export_onnx.py")
 
     # ─── 3. 处理配置（生成 .example，可选删除敏感配置） ────────
     # --keep-configs 时跳过删除，保留源码中的配置（便于与 slg-config 等共用）
     configs_dir = dist_dir / "configs"
     sensitive_configs = ("feishu.yaml", "db_info.yml", "doc_splitter.yaml", "lightrag.yaml")
+
+    # 部署结构比开发多一层 dist/，相对路径需要多上一级：../ → ../../
+    for cfg_file in configs_dir.iterdir():
+        if cfg_file.suffix in (".yaml", ".yml"):
+            text = cfg_file.read_text(encoding="utf-8")
+            text = text.replace('"../', '"../../')
+            cfg_file.write_text(text, encoding="utf-8")
+    print("[路径] 配置中的相对路径已适配部署目录层级 (../ → ../../)")
+
     for sensitive in sensitive_configs:
         src_cfg = configs_dir / sensitive
         example_cfg = configs_dir / f"{sensitive}.example"
@@ -582,17 +598,16 @@ def build(include_models: bool = True, include_venv: bool = False,
         print(f"    3. 进入 {dist_root.name}/ 双击 install.bat 注册定时任务")
     print()
     print("  目录结构：")
-    print(f"    根目录/")
-    print(f"    ├── {dist_root.name}/                   ← 程序打包目录")
-    print(f"    │   ├── install.bat             ← 双击注册定时任务")
-    print(f"    │   ├── uninstall.bat           ← 双击移除定时任务")
-    print(f"    │   ├── start.bat               ← 手动执行 / 运维")
-    print(f"    │   └── {dist_dir.name}/")
-    print(f"    │       ├── configs/            ← 配置文件")
-    print(f"    │       ├── setup.bat           ← 首次部署")
-    print(f"    │       └── run.py              ← 程序入口")
-    print(f"    ├── documents/              ← 飞书文档（运行后生成）")
-    print(f"    └── processed/              ← 处理产物（运行后生成）")
+    print(f"    {dist_root.name}/")
+    print(f"    ├── install.bat                 ← 双击注册定时任务")
+    print(f"    ├── uninstall.bat               ← 双击移除定时任务")
+    print(f"    ├── start.bat                   ← 手动执行 / 运维")
+    print(f"    ├── {dist_dir.name}/")
+    print(f"    │   ├── configs/                ← 配置文件")
+    print(f"    │   ├── setup.bat               ← 首次部署")
+    print(f"    │   └── run.py                  ← 程序入口")
+    print(f"    ├── documents/                  ← 飞书文档（运行后自动创建）")
+    print(f"    └── processed/                  ← 处理产物（运行后自动创建）")
     if slim:
         print()
         print("  轻量部署说明：")

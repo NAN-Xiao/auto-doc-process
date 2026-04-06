@@ -5,7 +5,7 @@ feishu:
   app_secret: "B5s9jSpZOjQTEiVGckuc2b0geUJyrGFr"
   base_url: "https://open.feishu.cn"
 
-  output_dir: "../../documents"  # 下载目录（相对于 auto-doc-process/，到根目录）
+  output_dir: ""  # 空=自动使用 doc_splitter.yaml 的 paths.documents_dir；如需单独指定可填写
 
   space_ids: []             # 同步空间ID，空=全部
 

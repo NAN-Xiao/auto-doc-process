@@ -45,7 +45,7 @@ from lightrag import LightRAG
 from lightrag.llm.openai import openai_complete_if_cache
 from lightrag.utils import EmbeddingFunc, always_get_an_event_loop
 
-from ..core.config import load_processor_config, load_db_config, CONFIGS_DIR
+from ..core.config import load_processor_config, load_db_config, CONFIGS_DIR, resolve_app_path
 from ..core.logger import Logger
 from ..core.utils import atomic_write_json, workspace_begin_write, workspace_end_write
 from .quality import summarize_batch_quality
@@ -78,19 +78,21 @@ def load_lightrag_config() -> dict:
     proc_cfg = load_processor_config()
     db_cfg = load_db_config()
 
-    # 从 doc_splitter.yaml 读取 LLM 配置（优先从新的 llm 块，回退到旧的 deepseek 块）
+    # 从 doc_splitter.yaml 继承 LLM 公共配置（lightrag.yaml 中的值优先）
     llm_proc = proc_cfg.get("llm", {})
-    deepseek_proc = proc_cfg.get("deepseek", {})
-    llm_key = llm_proc.get("api_key") or deepseek_proc.get("api_key", "")
-    if not lightrag_cfg.get("llm", {}).get("api_key"):
-        lightrag_cfg.setdefault("llm", {})["api_key"] = llm_key
+    lightrag_llm = lightrag_cfg.setdefault("llm", {})
+    for k in ("api_key", "api_base", "model"):
+        if not lightrag_llm.get(k):
+            lightrag_llm[k] = llm_proc.get(k, "")
 
-    # 从 doc_splitter.yaml 读取 embedding 相关配置
+    # 从 doc_splitter.yaml 继承 embedding 公共配置
     emb_proc = proc_cfg.get("embedding", {})
     hf_cfg = emb_proc.get("huggingface", {})
-    lightrag_cfg.setdefault("embedding", {})
-    lightrag_cfg["embedding"]["cache_folder"] = hf_cfg.get("cache_folder", "./models")
-    lightrag_cfg["embedding"]["device"] = hf_cfg.get("device", "cpu")
+    lightrag_emb = lightrag_cfg.setdefault("embedding", {})
+    if not lightrag_emb.get("model"):
+        lightrag_emb["model"] = emb_proc.get("model", "BAAI/bge-small-zh-v1.5")
+    lightrag_emb["cache_folder"] = hf_cfg.get("cache_folder", "./models")
+    lightrag_emb["device"] = hf_cfg.get("device", "cpu")
 
     # 数据库配置
     lightrag_cfg["database"] = db_cfg
@@ -145,7 +147,7 @@ def _create_local_embedding_func(config: dict) -> EmbeddingFunc:
 
 def _create_llm_func(config: dict):
     """
-    创建 DeepSeek LLM 调用函数（兼容 OpenAI 格式）
+    创建 LLM 调用函数（OpenAI 兼容格式）
 
     Args:
         config: lightrag 配置
@@ -154,15 +156,14 @@ def _create_llm_func(config: dict):
         异步 LLM 调用函数
     """
     llm_cfg = config.get("llm", {})
-    api_base = llm_cfg.get("api_base", "https://api.deepseek.com")
+    api_base = llm_cfg.get("api_base", "https://aikey.elex-tech.com/v1")
     api_key = llm_cfg.get("api_key", "")
-    model_name = llm_cfg.get("model", "deepseek-chat")
+    model_name = llm_cfg.get("model", "qwen3.5-plus")
 
     if not api_key:
-        Logger.error("未配置 DeepSeek API Key！请检查 doc_splitter.yaml 或 lightrag.yaml")
-        raise ValueError("Missing DeepSeek API Key")
+        Logger.error("未配置 LLM API Key！请检查 doc_splitter.yaml 或 lightrag.yaml")
+        raise ValueError("Missing LLM API Key")
 
-    # 设置环境变量（部分 LightRAG 内部逻辑会读取）
     os.environ.setdefault("OPENAI_API_KEY", api_key)
     os.environ.setdefault("OPENAI_API_BASE", api_base)
 
@@ -180,7 +181,7 @@ def _create_llm_func(config: dict):
         **kwargs,
     ) -> str:
         """
-        DeepSeek LLM 调用（OpenAI 兼容格式，带自动重试）
+        LLM 调用（OpenAI 兼容格式，带自动重试）
 
         注意：LightRAG 内部调用签名为 func(prompt, system_prompt=..., **kwargs)，
         model 已在闭包中绑定。
@@ -500,12 +501,9 @@ class LightRAGGraphBuilder:
         self._embedding_func = None
 
     def _resolve_working_dir(self) -> str:
-        """解析工作目录（相对路径基于 auto-doc-process/，与其他配置一致）"""
-        from ..core.config import MODULE_DIR
+        """解析工作目录（与 documents_dir/processed_dir 使用同一相对路径规则）。"""
         raw = self.config.get("working_dir", "../lightrag_workspace")
-        p = Path(raw)
-        if not p.is_absolute():
-            p = (MODULE_DIR / p).resolve()
+        p = resolve_app_path(raw)
         p.mkdir(parents=True, exist_ok=True)
         return str(p)
 

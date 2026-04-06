@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
 文档拆分工具
@@ -32,43 +32,62 @@ from .contracts import (
 from .doc_profile import classify_word_document, normalize_elements_by_doc_type
 
 
+def _encode_image_to_base64(image_data: bytes) -> str:
+    """将图片字节数据编码为 base64 字符串"""
+    import base64
+    return base64.b64encode(image_data).decode("utf-8")
+
+
+def _detect_image_mime(image_data: bytes) -> str:
+    """根据文件头检测图片 MIME 类型"""
+    if image_data[:8] == b'\x89PNG\r\n\x1a\n':
+        return "image/png"
+    if image_data[:2] == b'\xff\xd8':
+        return "image/jpeg"
+    if image_data[:4] == b'GIF8':
+        return "image/gif"
+    if image_data[:4] == b'RIFF' and image_data[8:12] == b'WEBP':
+        return "image/webp"
+    return "image/png"
+
+
 def generate_smart_image_name_with_llm(
     context_before: str, 
     context_after: str, 
     max_length: int = 10,
     llm=None,
     context_segments_before: Optional[List[ContextSegment]] = None,
-    context_segments_after: Optional[List[ContextSegment]] = None
-) -> str:
+    context_segments_after: Optional[List[ContextSegment]] = None,
+    image_data: Optional[bytes] = None,
+    original_filename: str = "",
+) -> Tuple[str, str]:
     """
-    使用 LLM 根据图片周围的上下文生成智能图片名称
-    支持考虑文本格式（标题）和距离权重
+    使用 LLM 视觉能力识别图片内容 + 结合上下文，生成智能图片名称和描述。
+    图片识别结果作为第一权重，上下文文字作为补充。
     
     Args:
-        context_before: 图片前的文字（兼容旧版）
-        context_after: 图片后的文字（兼容旧版）
-        max_length: 最大长度（中文字符数）
-        llm: LLM 实例（如果为 None，则使用简单算法）
-        context_segments_before: 图片前的上下文片段列表（带格式信息）
-        context_segments_after: 图片后的上下文片段列表（带格式信息）
+        context_before: 图片前的文字
+        context_after: 图片后的文字
+        max_length: 名称最大长度（中文字符数）
+        llm: LLM 实例
+        context_segments_before: 图片前的上下文片段列表
+        context_segments_after: 图片后的上下文片段列表
+        image_data: 图片二进制数据（用于视觉识别）
+        original_filename: 图片原始文件名（作为参考信息）
         
     Returns:
-        智能图片名称（不超过max_length个中文字）
+        (智能图片名称, 图片内容描述)
     """
     if llm is None:
-        # 如果没有 LLM，回退到简单算法
-        return generate_smart_image_name_simple(context_before, context_after, max_length)
+        return generate_smart_image_name_simple(context_before, context_after, max_length), ""
     
     try:
-        # 如果有结构化的上下文片段，使用增强的提示词
+        # 构建上下文
+        context_parts = []
         if context_segments_before or context_segments_after:
-            # 构建带权重的上下文描述
-            context_parts = []
-            
             if context_segments_before:
                 context_parts.append("【图片前的内容】")
-                for seg in reversed(context_segments_before):  # 从最近的开始
-                    prefix = ""
+                for seg in reversed(context_segments_before):
                     if seg.is_heading:
                         prefix = f"【标题{seg.heading_level}级】"
                     elif seg.distance == 0:
@@ -77,13 +96,10 @@ def generate_smart_image_name_with_llm(
                         prefix = f"【距离{seg.distance}段】"
                     else:
                         prefix = f"【较远{seg.distance}段】"
-                    
                     context_parts.append(f"{prefix} {seg.text}")
-            
             if context_segments_after:
                 context_parts.append("\n【图片后的内容】")
                 for seg in context_segments_after:
-                    prefix = ""
                     if seg.is_heading:
                         prefix = f"【标题{seg.heading_level}级】"
                     elif seg.distance == 0:
@@ -92,79 +108,94 @@ def generate_smart_image_name_with_llm(
                         prefix = f"【距离{seg.distance}段】"
                     else:
                         prefix = f"【较远{seg.distance}段】"
-                    
                     context_parts.append(f"{prefix} {seg.text}")
-            
-            context = "\n".join(context_parts)
-            
-            prompt = f"""请根据以下图片前后的文字内容，为这张图片生成一个简洁、完整、语义清晰的描述性名称。
-
-上下文说明：
-- 【紧邻】：表示这段文字紧挨着图片，与图片内容最直接相关，**权重最高**
-- 【距离X段】：表示距离图片的段落数，数字越小越接近图片，权重越高
-- 【较远X段】：表示距离较远，仅供参考
-- 【标题X级】：表示这段文字是标题，提供所属章节/分类信息，仅作为补充参考
-
-命名要求：
-1. **只输出图片名称，不要有任何其他文字、解释、标点符号或引号**
-2. 名称长度：{max_length}个中文字以内（尽量用足，保证语义完整）
-3. **【紧邻】和【距离1-2段】的文字权重最高**，图片名称应主要根据这些紧邻文字来描述图片的具体内容
-4. **标题仅作为分类参考**，不要让标题主导命名；如果紧邻文字已经能清晰描述图片，可以不使用标题
-5. **必须保证语义完整**：不要出现"副本开启界"这种截断的名称，而应该是"副本开启界面"或"副本开启界面流程图"
-6. 优先使用领域关键词：系统架构、流程图、数据模型、界面设计、功能示意图、配置表、关系图等
-7. 名称结构建议：[具体内容]+[类型]，例如："装备强化数值配置表"、"角色升级经验曲线图"、"背包系统交互流程图"
-
-{context}
-
-请直接输出完整的图片名称（{max_length}个中文字以内，不要标点符号和引号）："""
+            context_text = "\n".join(context_parts)
         else:
-            # 使用简单的上下文（兼容旧版）
-            context = f"图片前的内容：{context_before}\n\n图片后的内容：{context_after}"
-            
-            prompt = f"""请根据以下图片前后的文字内容，为这张图片生成一个简洁、完整、语义清晰的描述性名称。
+            context_text = f"图片前的内容：{context_before}\n\n图片后的内容：{context_after}"
 
+        filename_hint = f"\n图片原始文件名：{original_filename}" if original_filename else ""
+
+        prompt = f"""请仔细观察这张图片，结合图片内容和文档上下文，完成以下两个任务：
+
+## 任务1：生成图片名称
 要求：
-1. **只输出图片名称，不要有任何其他文字、解释、标点符号或引号**
-2. 名称长度：{max_length}个中文字以内（尽量用足，保证语义完整）
-3. **必须保证语义完整**：不要出现截断的名称，如"副本开启界"应该是"副本开启界面"
-4. 优先使用文中提到的关键词（如"系统架构"、"流程图"、"数据模型"、"界面设计"等）
-5. 名称结构建议：[主题]+[类型]，例如："装备系统流程图"、"角色属性配置表"
-6. 如果文中没有明确提示，请根据上下文推测图片主题
+1. **图片实际内容是第一权重**：名称必须准确反映图片中展示的内容（界面截图、流程图、数据表、示意图等）
+2. 结合文档上下文作为补充，确保名称与文档主题一致
+3. 名称长度：{max_length}个中文字以内，语义完整，不截断
+4. 名称结构：[具体内容]+[类型]，如"装备强化界面截图"、"战斗系统流程图"
+5. 不要有标点符号、引号或多余解释
 
-{context}
+## 任务2：生成图片内容描述
+要求：
+1. 用1-3句话描述图片中展示的具体内容
+2. 如果是界面截图，描述界面的功能和关键元素
+3. 如果是流程图/示意图，描述核心流程和关键节点
+4. 如果是数据表/配置表，描述表格的主题和关键字段
+{filename_hint}
 
-请直接输出完整的图片名称（{max_length}个中文字以内，不要标点符号和引号）："""
+{context_text}
 
-        # 调用 LLM（原生 openai SDK）
+请严格按以下格式输出（两行，不要有其他内容）：
+名称：<图片名称>
+描述：<图片内容描述>"""
+
         _client = llm["client"]
+        
+        # 构建消息：如果有图片数据，使用视觉多模态格式
+        if image_data and len(image_data) > 100:
+            mime_type = _detect_image_mime(image_data)
+            b64_image = _encode_image_to_base64(image_data)
+            messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64_image}"}},
+                    {"type": "text", "text": prompt},
+                ],
+            }]
+            Logger.info("使用视觉模式识别图片内容", indent=2)
+        else:
+            messages = [{"role": "user", "content": prompt}]
+
         _resp = _client.chat.completions.create(
             model=llm["model"],
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
             temperature=llm.get("temperature", 0.7),
-            max_tokens=llm.get("max_tokens", 100),
-            frequency_penalty=llm.get("frequency_penalty", 0.0),
-            presence_penalty=llm.get("presence_penalty", 0.0),
+            max_tokens=llm.get("max_tokens", 300),
         )
-        image_name = _resp.choices[0].message.content.strip()
+        raw_output = _resp.choices[0].message.content.strip()
         
-        # 清理结果：移除引号、特殊字符、空格等（保证 URL 安全）
+        # 解析输出：提取名称和描述
+        image_name = ""
+        image_description = ""
+        for line in raw_output.split("\n"):
+            line = line.strip()
+            if line.startswith("名称：") or line.startswith("名称:"):
+                image_name = line.split("：", 1)[-1].split(":", 1)[-1].strip()
+            elif line.startswith("描述：") or line.startswith("描述:"):
+                image_description = line.split("：", 1)[-1].split(":", 1)[-1].strip()
+        
+        # 如果解析失败，把整个输出当名称用
+        if not image_name:
+            image_name = raw_output.split("\n")[0].strip()
+        
+        # 清理名称
         image_name = re.sub(r'["\'\n\r\s，。！？、；：""''（）【】《》<>…·`~!@#$%^&*()\-_=+\[\]{}|\\;:,.<>?/]', '', image_name)
         image_name = image_name.strip()
         
-        # 限制长度
         if len(image_name) > max_length:
             image_name = image_name[:max_length]
         
-        # 如果结果为空或太短，使用简单算法
         if not image_name or len(image_name) < 2:
-            return generate_smart_image_name_simple(context_before, context_after, max_length)
+            return generate_smart_image_name_simple(context_before, context_after, max_length), image_description
         
         Logger.info(f"LLM生成: {image_name}", indent=2)
-        return image_name
+        if image_description:
+            Logger.info(f"图片描述: {image_description[:60]}...", indent=2)
+        return image_name, image_description
         
     except Exception as e:
         Logger.warning(f"LLM生成失败: {e}，使用简单算法", indent=2)
-        return generate_smart_image_name_simple(context_before, context_after, max_length)
+        return generate_smart_image_name_simple(context_before, context_after, max_length), ""
 
 
 def generate_smart_image_name_simple(context_before: str, context_after: str,
@@ -268,29 +299,27 @@ class DocumentSplitter:
         # 如果启用 LLM 命名，初始化 LLM
         if use_llm_naming:
             try:
-                # 优先从新的 llm 配置块读取，回退到旧的 deepseek 配置（向后兼容）
                 llm_config = self.config.get('llm', {})
-                deepseek_config = self.config.get('deepseek', {})
-                api_key = llm_config.get('api_key') or deepseek_config.get('api_key', '')
-                model = llm_config.get('model') or llm_config.get('default_model') or deepseek_config.get('default_model', 'deepseek-chat')
+                api_key = llm_config.get('api_key', '')
+                api_base = llm_config.get('api_base', 'https://aikey.elex-tech.com/v1')
+                model = llm_config.get('model', 'qwen3.5-plus')
 
-                image_llm_config = image_naming_config.get('llm', {})
                 if api_key:
                     import openai as _openai
                     self.llm = {
                         "client": _openai.OpenAI(
                             api_key=api_key,
-                            base_url=llm_config.get('api_base', image_llm_config.get('api_base', 'https://api.deepseek.com')),
+                            base_url=api_base,
                         ),
                         "model": model,
-                        "temperature": image_naming_config.get('temperature') or llm_config.get('temperature') or image_llm_config.get('temperature', 0.7),
-                        "max_tokens": image_naming_config.get('max_tokens') or llm_config.get('max_tokens') or image_llm_config.get('max_tokens', 100),
-                        "frequency_penalty": image_naming_config.get('frequency_penalty') or llm_config.get('frequency_penalty') or image_llm_config.get('frequency_penalty', 0.0),
-                        "presence_penalty": image_naming_config.get('presence_penalty') or llm_config.get('presence_penalty') or image_llm_config.get('presence_penalty', 0.0),
-                        }
-                    Logger.info(f"LLM智能命名已启用: {model}")
+                        "temperature": image_naming_config.get('temperature', llm_config.get('temperature', 0.7)),
+                        "max_tokens": image_naming_config.get('max_tokens', llm_config.get('max_tokens', 100)),
+                        "frequency_penalty": image_naming_config.get('frequency_penalty', 0.0),
+                        "presence_penalty": image_naming_config.get('presence_penalty', 0.0),
+                    }
+                    Logger.info(f"LLM智能命名已启用: {model} ({api_base})")
                 else:
-                    Logger.warning("未配置 DEEPSEEK_API_KEY，使用简单算法命名")
+                    Logger.warning("未配置 LLM API Key，使用简单算法命名")
                     self.use_llm_naming = False
             except Exception as e:
                 Logger.warning(f"LLM初始化失败: {e}，使用简单算法命名")
@@ -841,17 +870,19 @@ class DocumentSplitter:
             image_title = Path(image_info.smart_filename).stem
             image_title = re.sub(r'_(p\d{4}_\d{3}|\d{3})$', '', image_title)
 
-            context_parts = []
-            if image_info.context_before:
-                context_parts.append(f"图片前文：{self._compact_text(image_info.context_before, 80)}")
-            if image_info.context_after:
-                context_parts.append(f"图片后文：{self._compact_text(image_info.context_after, 80)}")
-
             placeholder_lines = [
                 f"图片：./images/{image_info.smart_filename}",
                 f"图片标题：{image_title}",
             ]
-            placeholder_lines.extend(context_parts)
+            if getattr(image_info, 'description', ''):
+                placeholder_lines.append(f"图片内容：{image_info.description}")
+            else:
+                context_parts = []
+                if image_info.context_before:
+                    context_parts.append(f"图片前文：{self._compact_text(image_info.context_before, 80)}")
+                if image_info.context_after:
+                    context_parts.append(f"图片后文：{self._compact_text(image_info.context_after, 80)}")
+                placeholder_lines.extend(context_parts)
             new_placeholder = "\n".join(placeholder_lines)
             
             # 替换占位符

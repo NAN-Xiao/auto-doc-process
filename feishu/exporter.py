@@ -18,7 +18,7 @@ import time
 import argparse
 from pathlib import Path
 
-from ..core.config import log, load_feishu_config, load_full_config, DEFAULT_EXPORT_DIR, setup_logging
+from ..core.config import log, load_feishu_config, load_full_config, setup_logging
 from . import api
 from . import manifest
 from ..core.utils import (

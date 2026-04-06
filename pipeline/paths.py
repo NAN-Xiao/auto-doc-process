@@ -4,7 +4,7 @@
 
 from pathlib import Path
 
-from ..core.config import MODULE_DIR, load_processor_config
+from ..core.config import resolve_app_path, load_processor_config
 
 
 def resolve_processed_dir() -> Path:
@@ -14,13 +14,8 @@ def resolve_processed_dir() -> Path:
 
     processed_dir = paths.get("processed_dir", "")
     if processed_dir:
-        path = Path(processed_dir)
-        if not path.is_absolute():
-            path = (MODULE_DIR / path).resolve()
-        return path
+        return resolve_app_path(processed_dir)
 
     documents_dir = paths.get("documents_dir", "../")
-    docs_path = Path(documents_dir)
-    if not docs_path.is_absolute():
-        docs_path = (MODULE_DIR / docs_path).resolve()
+    docs_path = resolve_app_path(documents_dir)
     return docs_path / "processed"

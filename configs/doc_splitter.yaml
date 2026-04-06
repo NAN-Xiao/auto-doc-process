@@ -4,9 +4,9 @@
 # 通用 LLM 配置（图片智能命名、图谱构建等功能共用）
 # ===========================================
 llm:
-  api_key: "sk-6bcfa69eced746968f1f2e7766ee7fcb"   # API Key（请替换为你的真实 Key）
-  api_base: "https://api.deepseek.com"             # API 地址
-  model: "deepseek-chat"                           # 默认模型
+  api_key: "apg_c2a9f12cb04b6db44c905952402619ba39a4eb446185653c"
+  api_base: "https://aikey.elex-tech.com/v1"
+  model: "qwen3.5-plus"
 
 doc_splitter:
   text_splitter:
@@ -46,16 +46,15 @@ doc_splitter:
     min_pattern_length: 3
     repeat_ratio_threshold: 0.6
 
-  supported_formats: [".pdf", ".docx", ".xlsx", ".xls"]
+  supported_formats: [".pdf", ".docx"]
 
   processing:
     skip_existing: false          # true=跳过已处理
     continue_on_error: true       # true=出错继续
 
 paths:
-  documents_dir: "../../documents"          # 源文档目录（飞书下载位置）
-  processed_dir: "../../processed"          # 处理产物目录（chunks/embeddings）
-  excel_dir: "../../documents/excel"        # Excel 目录
+  documents_dir: "../documents"             # 源文档目录（飞书下载位置）
+  processed_dir: "../processed"             # 处理产物目录（chunks/embeddings）
 
 embedding:
   model: "BAAI/bge-small-zh-v1.5"

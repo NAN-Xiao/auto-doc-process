@@ -78,7 +78,7 @@ class PgVectorStorage:
         parent_chunk_id   TEXT    NOT NULL DEFAULT '',
         table_index       INTEGER NOT NULL DEFAULT 0,
         table_headers_json JSONB  NOT NULL DEFAULT '[]'::jsonb,
-        row_data_json     JSONB   NOT NULL DEFAULT '{}'::jsonb,
+        row_data_json     JSONB   NOT NULL DEFAULT '{{}}'::jsonb,
         keywords_json     JSONB   NOT NULL DEFAULT '[]'::jsonb,
         source_file       TEXT    NOT NULL DEFAULT '',
         processed_batch_id TEXT DEFAULT '',

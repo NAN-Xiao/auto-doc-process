@@ -10,7 +10,6 @@ import json
 from ..core.config import load_processor_config as load_config
 from ..core.logger import Logger
 from ..core.utils import safe_filename, atomic_write_json
-from .excel.metadata import ExcelMetadataExtractor
 from .splitter import process_document
 from .embedder import EmbeddingGenerator
 from .storage import PgVectorStorage
@@ -51,11 +50,8 @@ class BatchWorkflow:
         else:
             self.processed_dir = self.documents_dir / 'processed'
 
-        self.excel_source_dir = Path(paths_config.get('excel_dir', self.documents_dir / 'excel'))
-        self.excel_extractor = ExcelMetadataExtractor()
-
         doc_config = self.config.get('doc_splitter', {})
-        self.supported_formats = doc_config.get('supported_formats', ['.pdf', '.docx', '.xlsx', '.xls'])
+        self.supported_formats = doc_config.get('supported_formats', ['.pdf', '.docx'])
         
         Logger.separator()
         Logger.info("批量处理工具已初始化")
@@ -74,23 +70,13 @@ class BatchWorkflow:
     def scan_documents(self) -> List[Path]:
         """扫描文档目录"""
         documents = []
-        doc_formats = {'.pdf', '.docx', '.doc'}
-        excel_formats = {'.xlsx', '.xls'}
 
         if self.documents_dir.exists():
             for fmt in self.supported_formats:
-                if fmt.lower() in doc_formats:
-                    documents.extend(self.documents_dir.glob(f"*{fmt}"))
+                documents.extend(self.documents_dir.glob(f"*{fmt}"))
         else:
             Logger.warning(f"文档目录不存在: {self.documents_dir}")
 
-        if self.excel_source_dir.exists():
-            for fmt in self.supported_formats:
-                if fmt.lower() in excel_formats:
-                    documents.extend(self.excel_source_dir.glob(f"*{fmt}"))
-        else:
-            Logger.warning(f"Excel 目录不存在: {self.excel_source_dir}")
-        
         documents = sorted(documents)
         
         return documents
@@ -110,9 +96,6 @@ class BatchWorkflow:
         Logger.separator()
         Logger.info(f"处理文档: {doc_path.name}")
         Logger.separator()
-
-        if doc_path.suffix.lower() in {'.xlsx', '.xls'}:
-            return self._process_excel_document(doc_path)
 
         start_time = datetime.now()
         if batch_timestamp is None:
@@ -288,24 +271,6 @@ class BatchWorkflow:
             import traceback
             traceback.print_exc()
             return result
-
-    def _process_excel_document(self, doc_path: Path) -> Dict[str, Any]:
-        """处理 Excel 配置表元数据。"""
-        Logger.info("步骤1：提取 Excel 元数据...")
-        result = self.excel_extractor.process_single_excel(doc_path)
-
-        if result.get('success'):
-            step = result.get('step1_split', {})
-            Logger.success("Excel 元数据提取成功")
-            Logger.info(f"输出文件: {step.get('output_path', '')}", indent=1)
-            Logger.info(f"工作表数: {step.get('extracted_sheets', 0)}", indent=1)
-            Logger.info(f"字段数: {step.get('field_count', 0)}", indent=1)
-        else:
-            Logger.error(f"Excel 处理失败: {result.get('error', '未知错误')}")
-
-        Logger.info("步骤2：跳过（Excel 元数据流程不生成 embeddings）")
-        Logger.info("步骤3：跳过（Excel 元数据流程不入库）")
-        return result
 
     def _build_source_doc_id(self, doc_path: Path, doc_meta: Dict[str, Any] = None) -> str:
         """构建稳定的文档来源 ID，优先使用上游来源链接。"""
